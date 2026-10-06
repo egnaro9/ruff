@@ -302,7 +302,8 @@ mod tests {
             .ok_or_else(|| anyhow::anyhow!("expected C"))?;
         let u = class
             .generic_context(db)
-            .and_then(|context| context.variables(db).next())
+            .variables(db)
+            .next()
             .ok_or_else(|| anyhow::anyhow!("expected C's U"))?;
         let t = create_typevar(db, "T");
         let int = KnownClass::Int.to_instance(db, &env);
@@ -374,7 +375,8 @@ mod tests {
             .ok_or_else(|| anyhow::anyhow!("expected Source"))?;
         let u = class
             .generic_context(db)
-            .and_then(|context| context.variables(db).next())
+            .variables(db)
+            .next()
             .ok_or_else(|| anyhow::anyhow!("expected Source's U"))?;
         let source = Type::instance(db, &env, class.identity_specialization(db));
         let t = create_typevar(db, "T");
@@ -449,8 +451,7 @@ mod tests {
             .place
             .expect_type()
             .as_class_literal()
-            .and_then(|class| class.generic_context(db))
-            .and_then(|context| context.variables(db).next())
+            .and_then(|class| class.generic_context(db).variables(db).next())
             .ok_or_else(|| anyhow::anyhow!("expected C's U"))?;
         let source = global_symbol(db, file, "source")
             .place
@@ -551,8 +552,8 @@ mod tests {
         let wrapped = global_symbol(db, file, "wrapped").place.expect_type();
         let u = wrapped
             .as_function_literal()
-            .and_then(|function| function.signature(db).overloads.first()?.generic_context)
-            .and_then(|context| context.variables(db).next())
+            .and_then(|function| function.signature(db).overloads.first())
+            .and_then(|signature| signature.generic_context.variables(db).next())
             .ok_or_else(|| anyhow::anyhow!("expected wrapped's U"))?;
         let reduced = global_symbol(db, file, "reduced")
             .place

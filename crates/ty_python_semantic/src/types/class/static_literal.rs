@@ -359,14 +359,14 @@ impl<'db> StaticClassLiteral<'db> {
 
     #[salsa::tracked(
         returns(copy),
-        cycle_initial=|_, _, _| None,
+        cycle_initial=|_, _, _| GenericContext::None,
         heap_size=ruff_memory_usage::heap_size,
     )]
-    pub(crate) fn generic_context(self, db: &'db dyn Db) -> Option<GenericContext<'db>> {
+    pub(crate) fn generic_context(self, db: &'db dyn Db) -> GenericContext<'db> {
         // Several typeshed definitions examine `sys.version_info`. To break cycles, we hard-code
         // the knowledge that this class is not generic.
         if self.is_known(db, KnownClass::VersionInfo) {
-            return None;
+            return GenericContext::None;
         }
 
         // We've already verified that the class literal does not contain both a PEP-695 generic
@@ -375,63 +375,70 @@ impl<'db> StaticClassLiteral<'db> {
         // Note that if a class has an explicit legacy generic context (by inheriting from
         // `typing.Generic`), and also an implicit one (by inheriting from other generic classes,
         // specialized by typevars), the explicit one takes precedence.
-        self.pep695_generic_context(db)
-            .or_else(|| self.legacy_generic_context(db))
+        // An incomplete PEP 695 parameter list can be empty, but still takes precedence
+        // over any legacy type variables in the bases.
+        if self.has_type_params(db) {
+            return self.pep695_generic_context(db);
+        }
+        self.legacy_generic_context(db)
             .or_else(|| self.inherited_legacy_generic_context(db))
     }
 
     pub(crate) fn has_pep_695_type_params(self, db: &'db dyn Db) -> bool {
-        self.pep695_generic_context(db).is_some()
+        self.has_type_params(db)
     }
 
-    pub(crate) fn pep695_generic_context(self, db: &'db dyn Db) -> Option<GenericContext<'db>> {
+    pub(crate) fn pep695_generic_context(self, db: &'db dyn Db) -> GenericContext<'db> {
         if !self.has_type_params(db) {
-            return None;
+            return GenericContext::None;
         }
         self.pep695_generic_context_inner(db)
     }
 
     #[salsa::tracked(
         returns(copy),
-        cycle_initial=|_, _, _| None,
+        cycle_initial=|_, _, _| GenericContext::None,
         heap_size=ruff_memory_usage::heap_size,
     )]
-    fn pep695_generic_context_inner(self, db: &'db dyn Db) -> Option<GenericContext<'db>> {
+    fn pep695_generic_context_inner(self, db: &'db dyn Db) -> GenericContext<'db> {
         let scope = self.body_scope(db);
         let program_file = scope.program_file(db);
         let python_file = program_file.python_file(db);
         let parsed = parsed_module(db, python_file).load(db);
         let class_def_node = scope.node(db).expect_class().node(&parsed);
-        class_def_node.type_params.as_ref().map(|type_params| {
-            let index = semantic_index(db, program_file);
-            let definition = index.expect_single_definition(class_def_node);
-            GenericContext::from_type_params(db, index, definition, type_params)
-        })
+        class_def_node
+            .type_params
+            .as_ref()
+            .map_or(GenericContext::None, |type_params| {
+                let index = semantic_index(db, program_file);
+                let definition = index.expect_single_definition(class_def_node);
+                GenericContext::from_type_params(db, index, definition, type_params)
+            })
     }
 
-    pub(crate) fn legacy_generic_context(self, db: &'db dyn Db) -> Option<GenericContext<'db>> {
-        self.explicit_bases(db).iter().find_map(|base| match base {
-            Type::KnownInstance(
-                KnownInstanceType::SubscriptedGeneric(generic_context)
-                | KnownInstanceType::SubscriptedProtocol(generic_context),
-            ) => Some(*generic_context),
-            _ => None,
-        })
+    pub(crate) fn legacy_generic_context(self, db: &'db dyn Db) -> GenericContext<'db> {
+        self.explicit_bases(db)
+            .iter()
+            .find_map(|base| match base {
+                Type::KnownInstance(
+                    KnownInstanceType::SubscriptedGeneric(generic_context)
+                    | KnownInstanceType::SubscriptedProtocol(generic_context),
+                ) => Some(*generic_context),
+                _ => None,
+            })
+            .unwrap_or_default()
     }
 
-    pub(crate) fn inherited_legacy_generic_context(
-        self,
-        db: &'db dyn Db,
-    ) -> Option<GenericContext<'db>> {
+    pub(crate) fn inherited_legacy_generic_context(self, db: &'db dyn Db) -> GenericContext<'db> {
         #[salsa::tracked(
             returns(copy),
-            cycle_initial=|_, _, _| None,
+            cycle_initial=|_, _, _| GenericContext::None,
             heap_size=ruff_memory_usage::heap_size,
         )]
         fn inherited_legacy_generic_context_inner<'db>(
             db: &'db dyn Db,
             class: StaticClassLiteral<'db>,
-        ) -> Option<GenericContext<'db>> {
+        ) -> GenericContext<'db> {
             GenericContext::from_base_classes(
                 db,
                 class.definition(db),
@@ -444,7 +451,7 @@ impl<'db> StaticClassLiteral<'db> {
         }
 
         if !self.has_explicit_bases(db) {
-            return None;
+            return GenericContext::None;
         }
         inherited_legacy_generic_context_inner(db, self)
     }
@@ -543,7 +550,7 @@ impl<'db> StaticClassLiteral<'db> {
     }
 
     /// Returns the generic context that should be inherited by any constructor methods of this class.
-    fn inherited_generic_context(self, db: &'db dyn Db) -> Option<GenericContext<'db>> {
+    fn inherited_generic_context(self, db: &'db dyn Db) -> GenericContext<'db> {
         self.generic_context(db)
     }
 
@@ -580,8 +587,8 @@ impl<'db> StaticClassLiteral<'db> {
         f: impl FnOnce(GenericContext<'db>) -> Specialization<'db>,
     ) -> ClassType<'db> {
         match self.generic_context(db) {
-            None => ClassType::NonGeneric(self.into()),
-            Some(generic_context) => {
+            GenericContext::None => ClassType::NonGeneric(self.into()),
+            generic_context @ GenericContext::Some(_) => {
                 let specialization = f(generic_context);
 
                 ClassType::Generic(GenericAlias::new(db, self, specialization))
@@ -602,7 +609,7 @@ impl<'db> StaticClassLiteral<'db> {
 
     pub(crate) fn top_materialization(self, db: &'db dyn Db) -> ClassType<'db> {
         self.apply_specialization(db, |generic_context| {
-            let env = ProgramEnvironment::from_program(generic_context.program(db));
+            let env = ProgramEnvironment::from_definition(self.definition(db));
             generic_context
                 .unknown_specialization(db, self.known(db))
                 .materialize_impl(
@@ -1391,7 +1398,7 @@ impl<'db> StaticClassLiteral<'db> {
         // we add their class's type variables to the callable's generic context, so those variables
         // are genuinely inferable and must remain generic instead of using the default arguments.
         if specialization.is_none()
-            && let Some(generic_context) = self.generic_context(db)
+            && let generic_context @ GenericContext::Some(_) = self.generic_context(db)
         {
             match name {
                 "__new__" | "__init__" => {
@@ -1453,7 +1460,7 @@ impl<'db> StaticClassLiteral<'db> {
         }
 
         let inherited_generic_context = if policy.no_inherited_generic_context() {
-            None
+            GenericContext::None
         } else {
             self.inherited_generic_context(db)
         };
@@ -1495,7 +1502,7 @@ impl<'db> StaticClassLiteral<'db> {
         self,
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
-        inherited_generic_context: Option<GenericContext<'db>>,
+        inherited_generic_context: GenericContext<'db>,
         specialization: Option<Specialization<'db>>,
         name: &str,
     ) -> Member<'db> {
@@ -1584,7 +1591,7 @@ impl<'db> StaticClassLiteral<'db> {
             // specialization.)
             match (inherited_generic_context, ty, specialization, name) {
                 (
-                    Some(generic_context),
+                    generic_context @ GenericContext::Some(_),
                     Type::FunctionLiteral(function),
                     Some(_),
                     "__new__" | "__init__",
@@ -1664,7 +1671,7 @@ impl<'db> StaticClassLiteral<'db> {
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
         specialization: Option<Specialization<'db>>,
-        inherited_generic_context: Option<GenericContext<'db>>,
+        inherited_generic_context: GenericContext<'db>,
         name: &str,
     ) -> Option<Type<'db>> {
         // Handle `@functools.total_ordering`: synthesize comparison methods
@@ -2016,7 +2023,7 @@ impl<'db> StaticClassLiteral<'db> {
                     name,
                     instance_ty,
                     fields_iter,
-                    specialization.map(|s| s.generic_context(db)),
+                    specialization.map_or(GenericContext::None, |s| s.generic_context(db)),
                 )
             }
             (
@@ -2369,7 +2376,9 @@ impl<'db> StaticClassLiteral<'db> {
         name: &str,
         policy: MemberLookupPolicy,
     ) -> PlaceAndQualifiers<'db> {
-        if let Some(member) = self.own_synthesized_member(db, env, specialization, None, name) {
+        if let Some(member) =
+            self.own_synthesized_member(db, env, specialization, GenericContext::None, name)
+        {
             Place::bound(member).into()
         } else {
             let class = self.apply_optional_specialization(db, specialization);
@@ -3404,9 +3413,7 @@ impl<'db> StaticClassLiteral<'db> {
                 .variance_of_items(db, &env, typevar);
         }
 
-        let typevar_in_generic_context = self
-            .generic_context(db)
-            .is_some_and(|generic_context| generic_context.contains(db, typevar));
+        let typevar_in_generic_context = self.generic_context(db).contains(db, typevar);
 
         if !typevar_in_generic_context {
             return VarianceTerm::BIVARIANT;

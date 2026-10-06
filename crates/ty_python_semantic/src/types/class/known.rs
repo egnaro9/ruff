@@ -1295,7 +1295,9 @@ impl KnownClass {
             .to_class_literal(db, env)
             .as_class_literal()?
             .as_static()?;
-        let generic_context = class_literal.generic_context(db)?;
+        let generic_context @ GenericContext::Some(_) = class_literal.generic_context(db) else {
+            return None;
+        };
         let specialization = specialization.into();
 
         Some(to_specialized_class_type_impl(

@@ -2,10 +2,11 @@ use crate::{Program, ProgramEnvironment};
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::hash_map::Entry;
+use std::hash::BuildHasherDefault;
 
 use itertools::Itertools;
 use ruff_python_ast as ast;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use smallvec::SmallVec;
 
 use crate::types::callable::walk_callable_type;
@@ -57,7 +58,8 @@ pub(crate) fn enclosing_generic_contexts<'db>(
 ) -> impl Iterator<Item = GenericContext<'db>> {
     index
         .ancestor_scopes(scope)
-        .filter_map(|(_, ancestor_scope)| GenericContext::of_node(db, ancestor_scope.node(), index))
+        .map(|(_, ancestor_scope)| GenericContext::of_node(db, ancestor_scope.node(), index))
+        .filter(|context| context.is_some())
 }
 
 /// Returns the binding contexts introduced by the given scope or any enclosing scope.
@@ -241,7 +243,7 @@ fn find_typevar_binding<'db>(
         // An enclosing function's context can also retain a type variable originally bound by its
         // enclosing class, so check the binding context as well as the ancestor node.
         if (!is_class_scope || !crossed_class_scope)
-            && let Some(generic_context) = generic_context
+            && let generic_context @ GenericContext::Some(_) = generic_context
             && let Some(bound) = generic_context.binds_typevar(db, typevar)
             && is_visible_across_class_boundary(db, bound, crossed_class_scope)
         {
@@ -343,8 +345,18 @@ pub(crate) fn typing_self<'db>(
 ///
 /// Variables are keyed by bound occurrence identity, so freshened copies of the same source-level
 /// generic context can coexist without collapsing into each other.
+/// An empty list is represented by `None`; constructors only create `Some` for nonempty lists.
+#[derive(
+    Clone, Copy, Debug, Default, Hash, Eq, PartialEq, get_size2::GetSize, salsa::SalsaValue,
+)]
+pub enum GenericContext<'db> {
+    #[default]
+    None,
+    Some(GenericContextInner<'db>),
+}
+
 #[salsa::interned(debug, constructor=new_internal, heap_size=ruff_memory_usage::heap_size)]
-pub struct GenericContext<'db> {
+pub struct GenericContextInner<'db> {
     #[returns(copy)]
     pub(crate) program: Program<'db>,
 
@@ -363,9 +375,41 @@ pub(super) fn walk_generic_context<'db, V: TypeVisitor<'db> + ?Sized>(
 }
 
 // The Salsa heap is tracked separately.
-impl get_size2::GetSize for GenericContext<'_> {}
+impl get_size2::GetSize for GenericContextInner<'_> {}
 
 impl<'db> GenericContext<'db> {
+    pub(crate) fn is_none(self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    pub(crate) fn is_some(self) -> bool {
+        matches!(self, Self::Some(_))
+    }
+
+    pub(crate) fn or_else(self, other: impl FnOnce() -> Self) -> Self {
+        match self {
+            Self::None => other(),
+            Self::Some(_) => self,
+        }
+    }
+
+    pub(crate) fn program(self, db: &'db dyn Db) -> Option<Program<'db>> {
+        match self {
+            Self::None => None,
+            Self::Some(inner) => Some(inner.program(db)),
+        }
+    }
+
+    fn variables_inner(
+        self,
+        db: &'db dyn Db,
+    ) -> &'db FxOrderMap<BoundTypeVarIdentity<'db>, BoundTypeVarInstance<'db>> {
+        match self {
+            Self::None => const { &FxOrderMap::with_hasher(BuildHasherDefault::<FxHasher>::new()) },
+            Self::Some(inner) => inner.variables_inner(db),
+        }
+    }
+
     /// Creates a generic context from a list of PEP-695 type parameters.
     pub(crate) fn from_type_params(
         db: &'db dyn Db,
@@ -384,27 +428,29 @@ impl<'db> GenericContext<'db> {
         db: &'db dyn Db,
         node: &NodeWithScopeKind,
         index: &SemanticIndex<'db>,
-    ) -> Option<Self> {
+    ) -> Self {
         match node {
             NodeWithScopeKind::Class(class) => {
                 let definition = index.expect_single_definition(class);
-                original_class_type(db, definition)?.generic_context(db)
+                original_class_type(db, definition)
+                    .map_or(Self::None, |class| class.generic_context(db))
             }
             NodeWithScopeKind::Function(function) => {
                 let definition = index.expect_single_definition(function);
                 infer_definition_types(db, definition)
-                    .function_type(definition)?
-                    .last_definition_signature(db)
-                    .generic_context
+                    .function_type(definition)
+                    .map_or(Self::None, |function| {
+                        function.last_definition_signature(db).generic_context
+                    })
             }
             NodeWithScopeKind::TypeAlias(type_alias) => {
                 let definition = index.expect_single_definition(type_alias);
                 binding_type(db, definition)
-                    .as_type_alias()?
-                    .as_pep_695_type_alias()?
-                    .generic_context(db)
+                    .as_type_alias()
+                    .and_then(TypeAliasType::as_pep_695_type_alias)
+                    .map_or(Self::None, |alias| alias.generic_context(db))
             }
-            _ => None,
+            _ => Self::None,
         }
     }
 
@@ -416,13 +462,16 @@ impl<'db> GenericContext<'db> {
         db: &'db dyn Db,
         node: &NodeWithScopeKind,
         index: &SemanticIndex<'db>,
-    ) -> Option<Self> {
+    ) -> Self {
         if let NodeWithScopeKind::Function(function) = node {
             let definition = index.expect_single_definition(function);
             infer_definition_types(db, definition)
-                .function_type(definition)?
-                .last_definition_raw_signature(db, ReturnCallableTypeVarScope::Lexical)
-                .generic_context
+                .function_type(definition)
+                .map_or(Self::None, |function| {
+                    function
+                        .last_definition_raw_signature(db, ReturnCallableTypeVarScope::Lexical)
+                        .generic_context
+                })
         } else {
             Self::of_node(db, node, index)
         }
@@ -442,40 +491,31 @@ impl<'db> GenericContext<'db> {
         program: Program<'db>,
         type_params: impl IntoIterator<Item = BoundTypeVarInstance<'db>>,
     ) -> Self {
-        Self::new_internal(
-            db,
-            program,
-            type_params
-                .into_iter()
-                .map(|variable| (variable.identity(db), variable))
-                .collect::<FxOrderMap<_, _>>(),
-        )
+        let mut variables = type_params
+            .into_iter()
+            .map(|variable| (variable.identity(db), variable))
+            .collect::<FxOrderMap<_, _>>();
+        if variables.is_empty() {
+            return Self::None;
+        }
+        variables.shrink_to_fit();
+        Self::Some(GenericContextInner::new_internal(db, program, variables))
     }
 
     /// Merge this generic context with another, returning a new generic context that
     /// contains type variables from both contexts.
     pub(crate) fn merge(self, db: &'db dyn Db, other: Self) -> Self {
-        let program = self.program(db);
-        debug_assert_eq!(program, other.program(db));
-        Self::from_typevar_instances_in_program(
-            db,
-            program,
-            self.variables_inner(db)
-                .values()
-                .chain(other.variables_inner(db).values())
-                .copied(),
-        )
-    }
-
-    pub(crate) fn merge_optional(
-        db: &'db dyn Db,
-        left: Option<Self>,
-        right: Option<Self>,
-    ) -> Option<Self> {
-        match (left, right) {
-            (None, None) => None,
-            (Some(one), None) | (None, Some(one)) => Some(one),
-            (Some(left), Some(right)) => Some(left.merge(db, right)),
+        match (self, other) {
+            (Self::None, other) | (other, Self::None) => other,
+            (Self::Some(left), Self::Some(right)) => {
+                let program = left.program(db);
+                debug_assert_eq!(program, right.program(db));
+                Self::from_typevar_instances_in_program(
+                    db,
+                    program,
+                    self.variables(db).chain(other.variables(db)),
+                )
+            }
         }
     }
 
@@ -484,25 +524,31 @@ impl<'db> GenericContext<'db> {
         db: &'db dyn Db,
         binding_context: Option<BindingContext<'db>>,
     ) -> Self {
+        let Self::Some(inner) = self else {
+            return self;
+        };
+
         #[salsa::tracked(returns(copy), heap_size=ruff_memory_usage::heap_size)]
         fn remove_self_inner<'db>(
             db: &'db dyn Db,
-            generic_context: GenericContext<'db>,
+            inner: GenericContextInner<'db>,
             binding_context: Option<BindingContext<'db>>,
         ) -> GenericContext<'db> {
             GenericContext::from_typevar_instances_in_program(
                 db,
-                generic_context.program(db),
-                generic_context.variables(db).filter(|bound_typevar| {
-                    !(bound_typevar.typevar(db).is_self(db)
-                        && binding_context.is_none_or(|binding_context| {
-                            bound_typevar.binding_context(db) == binding_context
-                        }))
-                }),
+                inner.program(db),
+                GenericContext::Some(inner)
+                    .variables(db)
+                    .filter(|bound_typevar| {
+                        !(bound_typevar.typevar(db).is_self(db)
+                            && binding_context.is_none_or(|binding_context| {
+                                bound_typevar.binding_context(db) == binding_context
+                            }))
+                    }),
             )
         }
 
-        remove_self_inner(db, self, binding_context)
+        remove_self_inner(db, inner, binding_context)
     }
 
     /// Returns the typevars directly bound by this generic context.
@@ -591,7 +637,7 @@ impl<'db> GenericContext<'db> {
         definition: Definition<'db>,
         parameters: &Parameters<'db>,
         return_type: Type<'db>,
-    ) -> Option<Self> {
+    ) -> Self {
         let env = ProgramEnvironment::from_definition(definition);
         // Find all of the legacy typevars mentioned in the function signature.
         let mut variables = FxOrderSet::default();
@@ -605,32 +651,29 @@ impl<'db> GenericContext<'db> {
         }
         return_type.find_legacy_typevars(db, &env, Some(definition), &mut variables);
 
-        if variables.is_empty() {
-            return None;
-        }
-        Some(Self::from_typevar_instances(db, &env, variables))
+        Self::from_typevar_instances(db, &env, variables)
     }
 
     pub(crate) fn merge_pep695_and_legacy(
         db: &'db dyn Db,
-        pep695_generic_context: Option<Self>,
-        legacy_generic_context: Option<Self>,
-    ) -> Option<Self> {
+        pep695_generic_context: Self,
+        legacy_generic_context: Self,
+    ) -> Self {
         match (legacy_generic_context, pep695_generic_context) {
-            (Some(legacy_ctx), Some(env)) => {
+            (legacy_ctx @ Self::Some(_), env @ Self::Some(_)) => {
                 if legacy_ctx
                     .variables(db)
                     .exactly_one()
                     .is_ok_and(|bound_typevar| bound_typevar.typevar(db).is_self(db))
                 {
-                    Some(legacy_ctx.merge(db, env))
+                    legacy_ctx.merge(db, env)
                 } else {
                     // Invalid mixes retained in the inferred signature are reported during
                     // post-inference validation.
-                    Some(env)
+                    env
                 }
             }
-            (left, right) => left.or(right),
+            (Self::None, right) | (right, Self::None) => right,
         }
     }
 
@@ -640,25 +683,22 @@ impl<'db> GenericContext<'db> {
         db: &'db dyn Db,
         definition: Definition<'db>,
         bases: impl Iterator<Item = Type<'db>>,
-    ) -> Option<Self> {
+    ) -> Self {
         let env = ProgramEnvironment::from_definition(definition);
         let mut variables = FxOrderSet::default();
         for base in bases {
             base.find_legacy_typevars(db, &env, Some(definition), &mut variables);
         }
-        if variables.is_empty() {
-            return None;
-        }
-        Some(Self::from_typevar_instances(db, &env, variables))
+        Self::from_typevar_instances(db, &env, variables)
     }
 
     pub(crate) fn remove_callable_only_typevars(
         db: &'db dyn Db,
-        generic_context: Option<Self>,
+        generic_context: Self,
         parameters: &Parameters<'db>,
         return_type: Type<'db>,
         function_definition: Definition<'db>,
-    ) -> (Option<Self>, Type<'db>) {
+    ) -> (Self, Type<'db>) {
         #[derive(Default)]
         struct TypeVarLocations<'db> {
             /// The set of typevars that appear somewhere other than in a `Callable` in the return
@@ -826,9 +866,9 @@ impl<'db> GenericContext<'db> {
 
         // If the function in question is not generic, then there are no typevars, and we don't
         // have to worry about which ones appear in return type Callables.
-        let Some(generic_context) = generic_context else {
-            return (None, return_type);
-        };
+        if generic_context.is_none() {
+            return (Self::None, return_type);
+        }
         let env = ProgramEnvironment::from_definition(function_definition);
 
         // Find whether each typevar appears inside and/or outside a return type Callable.
@@ -857,19 +897,10 @@ impl<'db> GenericContext<'db> {
             return_type.apply_type_mapping(db, &env, &type_mapping, TypeContext::default());
 
         // And lastly remove those typevars from the function's generic context.
-        let mut kept_typevars = generic_context
+        let kept_typevars = generic_context
             .variables(db)
-            .filter(|bound_typevar| !found_only_inside_callable_return.contains(bound_typevar))
-            .peekable();
-        let generic_context = if kept_typevars.peek().is_none() {
-            None
-        } else {
-            Some(GenericContext::from_typevar_instances(
-                db,
-                &env,
-                kept_typevars,
-            ))
-        };
+            .filter(|bound_typevar| !found_only_inside_callable_return.contains(bound_typevar));
+        let generic_context = GenericContext::from_typevar_instances(db, &env, kept_typevars);
 
         (generic_context, return_type)
     }
@@ -884,8 +915,10 @@ impl<'db> GenericContext<'db> {
         known_class: Option<KnownClass>,
     ) -> Specialization<'db> {
         let partial = self.specialize_partial(db, std::iter::repeat_n(None, self.len(db)));
-        if known_class == Some(KnownClass::Tuple) {
-            let env = ProgramEnvironment::from_program(self.program(db));
+        if known_class == Some(KnownClass::Tuple)
+            && let Some(program) = self.program(db)
+        {
+            let env = ProgramEnvironment::from_program(program);
             Specialization::new(
                 db,
                 self,
@@ -923,7 +956,10 @@ impl<'db> GenericContext<'db> {
         db: &'db dyn Db,
         known_class: Option<KnownClass>,
     ) -> Specialization<'db> {
-        let env = ProgramEnvironment::from_program(self.program(db));
+        let Some(program) = self.program(db) else {
+            return self.specialize(db, &[]);
+        };
+        let env = ProgramEnvironment::from_program(program);
         Specialization::new(
             db,
             self,
@@ -1011,7 +1047,10 @@ impl<'db> GenericContext<'db> {
         db: &'db dyn Db,
         mut types: Box<[Type<'db>]>,
     ) -> Specialization<'db> {
-        let env = ProgramEnvironment::from_program(self.program(db));
+        let Some(program) = self.program(db) else {
+            return self.specialize(db, types.as_ref());
+        };
+        let env = ProgramEnvironment::from_program(program);
         let len = types.len();
         let variables = self.variables(db).collect_vec();
         loop {
@@ -1067,10 +1106,13 @@ impl<'db> GenericContext<'db> {
         I: IntoIterator<Item = Option<Type<'db>>>,
         I::IntoIter: ExactSizeIterator,
     {
-        let env = ProgramEnvironment::from_program(self.program(db));
         let types = types.into_iter();
         let variables = self.variables(db);
         assert_eq!(self.len(db), types.len());
+        let Some(program) = self.program(db) else {
+            return Box::default();
+        };
+        let env = ProgramEnvironment::from_program(program);
 
         // Typevars can have other typevars as their default values, e.g.
         //
@@ -1254,7 +1296,10 @@ impl<'db> Specialization<'db> {
     /// `str` when the argument is `Any`. Using `Any & str` lets structural comparisons
     /// materialize the member in either direction without losing that bound.
     pub(super) fn with_typevar_bounds(self, db: &'db dyn Db) -> Self {
-        let env = ProgramEnvironment::from_program(self.generic_context(db).program(db));
+        let Some(program) = self.generic_context(db).program(db) else {
+            return self;
+        };
+        let env = ProgramEnvironment::from_program(program);
         let types = self.map_types(db, |_, typevar, ty| {
             if !any_over_type_expanding_aliases(db, &env, ty, |ty| ty.is_dynamic()) {
                 return ty;
@@ -1328,7 +1373,10 @@ impl<'db> Specialization<'db> {
             return self;
         }
 
-        let env = ProgramEnvironment::from_program(self.generic_context(db).program(db));
+        let Some(program) = self.generic_context(db).program(db) else {
+            return self;
+        };
+        let env = ProgramEnvironment::from_program(program);
         Self::new(
             db,
             self.generic_context(db),
@@ -1366,7 +1414,10 @@ impl<'db> Specialization<'db> {
     /// That lets us produce the generic alias `A[int]`, which is the corresponding entry in the
     /// MRO of `B[int]`.
     fn apply_specialization(self, db: &'db dyn Db, other: Specialization<'db>) -> Self {
-        let env = &ProgramEnvironment::from_program(other.generic_context(db).program(db));
+        let Some(program) = other.generic_context(db).program(db) else {
+            return self;
+        };
+        let env = &ProgramEnvironment::from_program(program);
         self.apply_specialization_impl(db, other, false, &ApplyTypeMappingVisitor::new(env))
     }
 
@@ -1503,7 +1554,10 @@ impl<'db> Specialization<'db> {
     pub(crate) fn combine(self, db: &'db dyn Db, other: Self) -> Self {
         let generic_context = self.generic_context(db);
         assert_eq!(other.generic_context(db), generic_context);
-        let env = ProgramEnvironment::from_program(generic_context.program(db));
+        let Some(program) = generic_context.program(db) else {
+            return self;
+        };
+        let env = ProgramEnvironment::from_program(program);
         // TODO special-casing Unknown to mean "no mapping" is not right here, and can give
         // confusing/wrong results in cases where there was a mapping found for a typevar, and it
         // was of type Unknown. It's also wrong in case a typevar has a default, in which case it
@@ -2463,7 +2517,10 @@ impl<'db> InferSpecialization<'db> {
         if matches!(identity, TypeIdentity::Other(_)) {
             return (identity, Box::default());
         }
-        let env = ProgramEnvironment::from_program(self.generic_context.program(db));
+        let Some(program) = self.generic_context.program(db) else {
+            return (identity, Box::default());
+        };
+        let env = ProgramEnvironment::from_program(program);
         let specialization = match ty {
             Type::TypeAlias(alias) => alias.specialization(db),
             Type::Recursive(recursive) => recursive.arguments(db),
@@ -5195,7 +5252,8 @@ mod tests {
             .place
             .expect_type()
             .as_function_literal()
-            .and_then(|function| function.signature(db).overloads.first()?.generic_context)
+            .and_then(|function| function.signature(db).overloads.first())
+            .map(|signature| signature.generic_context)
             .ok_or_else(|| anyhow::anyhow!("expected a generic function"))?;
         let (t, u) = context
             .variables(db)
@@ -5302,7 +5360,8 @@ mod tests {
             .place
             .expect_type()
             .as_function_literal()
-            .and_then(|function| function.signature(db).overloads.first()?.generic_context)
+            .and_then(|function| function.signature(db).overloads.first())
+            .map(|signature| signature.generic_context)
             .ok_or_else(|| anyhow::anyhow!("expected generic function {name}"))
     }
 

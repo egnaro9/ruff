@@ -152,7 +152,7 @@ fn generic_contexts_mentioned_in_type<'db>(
 
     impl<'db> GenericContextCollector<'_, 'db> {
         fn visit_signature(&self, db: &'db dyn Db, signature: &Signature<'db>) {
-            if let Some(generic_context) = signature.generic_context {
+            if let generic_context @ GenericContext::Some(_) = signature.generic_context {
                 self.generic_contexts.borrow_mut().insert(generic_context);
             }
             for parameter in signature.parameters() {
@@ -738,20 +738,18 @@ impl<'db> Bindings<'db> {
                 match item {
                     CallableItem::Regular(binding) => {
                         for overload in &mut binding.overloads {
-                            overload.signature.generic_context = GenericContext::merge_optional(
-                                db,
-                                overload.signature.generic_context,
-                                Some(generic_context),
-                            );
+                            overload.signature.generic_context = overload
+                                .signature
+                                .generic_context
+                                .merge(db, generic_context);
                         }
                     }
                     CallableItem::Constructor(binding) => {
                         for overload in &mut binding.entry.overloads {
-                            overload.signature.generic_context = GenericContext::merge_optional(
-                                db,
-                                overload.signature.generic_context,
-                                Some(generic_context),
-                            );
+                            overload.signature.generic_context = overload
+                                .signature
+                                .generic_context
+                                .merge(db, generic_context);
                         }
                         if let Some(downstream) = binding.downstream_constructor_mut() {
                             downstream.apply_generic_context_in_place(db, generic_context);
@@ -881,9 +879,9 @@ impl<'db> Bindings<'db> {
     pub(crate) fn with_generic_context(
         mut self,
         db: &'db dyn Db,
-        generic_context: Option<GenericContext<'db>>,
+        generic_context: GenericContext<'db>,
     ) -> Self {
-        let Some(generic_context) = generic_context else {
+        let generic_context @ GenericContext::Some(_) = generic_context else {
             return self;
         };
         self.apply_generic_context_in_place(db, generic_context);
@@ -2138,9 +2136,12 @@ impl<'db> Bindings<'db> {
 
                                     let default_specialization = class_default_specialization
                                         .or_else(|| {
-                                            overload.signature.generic_context.map(
-                                                |generic_context| {
-                                                    generic_context.default_specialization(db, None)
+                                            overload.signature.generic_context.is_some().then(
+                                                || {
+                                                    overload
+                                                        .signature
+                                                        .generic_context
+                                                        .default_specialization(db, None)
                                                 },
                                             )
                                         });
@@ -2318,11 +2319,12 @@ impl<'db> Bindings<'db> {
 
                         Some(KnownFunction::GenericContext) => {
                             if let [Some(ty)] = overload.parameter_types() {
-                                let wrap_generic_context = |generic_context| {
-                                    Type::KnownInstance(KnownInstanceType::GenericContext(
-                                        generic_context,
-                                    ))
-                                };
+                                let wrap_generic_context =
+                                    |generic_context: GenericContext<'db>| {
+                                        generic_context.is_some().then_some(Type::KnownInstance(
+                                            KnownInstanceType::GenericContext(generic_context),
+                                        ))
+                                    };
 
                                 let signature_generic_context =
                                     |signature: &CallableSignature<'db>| {
@@ -2330,14 +2332,14 @@ impl<'db> Bindings<'db> {
                                             db,
                                             env,
                                             signature.overloads.iter().map(|signature| {
-                                                signature.generic_context.map(wrap_generic_context)
+                                                wrap_generic_context(signature.generic_context)
                                             }),
                                         )
                                     };
 
                                 let generic_context_for_simple_type = |ty: Type<'db>| match ty {
                                     Type::ClassLiteral(class) => {
-                                        class.generic_context(db).map(wrap_generic_context)
+                                        wrap_generic_context(class.generic_context(db))
                                     }
 
                                     Type::FunctionLiteral(function) => {
@@ -2354,7 +2356,7 @@ impl<'db> Bindings<'db> {
 
                                     Type::KnownInstance(KnownInstanceType::TypeAliasType(
                                         alias,
-                                    )) => alias.generic_context(db).map(wrap_generic_context),
+                                    )) => wrap_generic_context(alias.generic_context(db)),
 
                                     _ => None,
                                 };
@@ -3569,12 +3571,11 @@ impl<'db> CallableBinding<'db> {
 
         // ParamSpec freshening needs relation-side support so `Callable[P, R]` inference doesn't
         // quantify away `P` before call specialization can use it.
-        if self.overloads.iter().any(|overload| {
-            overload
-                .signature
-                .generic_context
-                .is_some_and(|generic_context| generic_context_has_paramspec(db, generic_context))
-        }) {
+        if self
+            .overloads
+            .iter()
+            .any(|overload| generic_context_has_paramspec(db, overload.signature.generic_context))
+        {
             return;
         }
 
@@ -3589,7 +3590,8 @@ impl<'db> CallableBinding<'db> {
         // that causes their typevars to collide.
         let nonce = nonce_generator.next();
         for overload in &mut self.overloads {
-            let Some(generic_context) = overload.signature.generic_context else {
+            let generic_context @ GenericContext::Some(_) = overload.signature.generic_context
+            else {
                 continue;
             };
             if nonce_generator.should_freshen(db, generic_context) {
@@ -6089,7 +6091,7 @@ impl<'db> CallInference<'_, 'db> {
     fn infer(self, constraints: &ConstraintSetBuilder<'db>) -> InferredCall<'db> {
         let db = self.db;
         let mut constraint_set_errors = vec![false; self.arguments.len()];
-        let Some(generic_context) = self.signature.generic_context else {
+        let generic_context @ GenericContext::Some(_) = self.signature.generic_context else {
             return InferredCall {
                 inferable_typevars: self.inferable_typevars,
                 inference: None,
@@ -7768,7 +7770,7 @@ impl<'db> Binding<'db> {
         binding: &CallableBinding<'db>,
         argument_index: usize,
     ) -> usize {
-        let Some(generic_context) = self.signature.generic_context else {
+        let generic_context @ GenericContext::Some(_) = self.signature.generic_context else {
             return 0;
         };
         let Some(argument) = self.matched_argument_for_call_argument(binding, argument_index)
@@ -8105,7 +8107,9 @@ impl<'db> Binding<'db> {
         constraints: &ConstraintSetBuilder<'db>,
         call_expression_tcx: TypeContext<'db>,
     ) -> Option<Specialization<'db>> {
-        let generic_context = self.signature.generic_context?;
+        let generic_context @ GenericContext::Some(_) = self.signature.generic_context else {
+            return None;
+        };
 
         let mut return_type_solutions: FxHashMap<BoundTypeVarIdentity<'db>, Type<'db>> =
             FxHashMap::default();
@@ -8310,10 +8314,7 @@ impl<'db> Binding<'db> {
             call_expression_tcx,
             return_ty: self.return_ty,
             is_partial_application: self.is_partial_application,
-            inferable_typevars: self
-                .signature
-                .generic_context
-                .map_or(TypeVarSet::None, |context| context.inferable_typevars(db)),
+            inferable_typevars: self.signature.generic_context.inferable_typevars(db),
         }
         .infer(constraints);
 

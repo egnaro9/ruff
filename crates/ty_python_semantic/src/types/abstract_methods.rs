@@ -15,8 +15,8 @@ use crate::{
     diagnostic::format_enumeration,
     place::{DefinedPlace, Place, place_from_bindings, place_from_declarations},
     types::{
-        ClassBase, ClassLiteral, ClassType, LintDiagnosticGuard, Parameters, Signature, Type,
-        binding_type,
+        ClassBase, ClassLiteral, ClassType, GenericContext, LintDiagnosticGuard, Parameters,
+        Signature, Type, binding_type,
         diagnostic::{AbstractMethodAnnotationPolicy, abstract_method_span},
         function::{AbstractMethodKind, FunctionDecorators},
         infer::{function_known_decorators, infer_definition_types},
@@ -300,8 +300,11 @@ impl<'db> ClassType<'db> {
             // Currently we do not recognize dynamic classes as being able to define abstract methods,
             // but we do recognise them as being able to override abstract methods defined in static classes.
             let ClassLiteral::Static(class_literal) = class.class_literal(db) else {
-                abstract_methods
-                    .retain(|name, _| class.own_class_member(db, env, None, name).is_undefined());
+                abstract_methods.retain(|name, _| {
+                    class
+                        .own_class_member(db, env, GenericContext::None, name)
+                        .is_undefined()
+                });
                 continue;
             };
 
@@ -316,7 +319,7 @@ impl<'db> ClassType<'db> {
             // or this class has a `ClassVar` declaration by that name
             abstract_methods.retain(|name, _| {
                 if class_literal
-                    .own_synthesized_member(db, env, None, None, name)
+                    .own_synthesized_member(db, env, None, GenericContext::None, name)
                     .is_some()
                 {
                     return false;

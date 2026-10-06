@@ -124,8 +124,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             // ordinary call checking to report argument errors.
             KnownClass::Dict
                 .try_to_class_literal(db, self.program_environment())
-                .and_then(|class| class.generic_context(db))
-                .is_none()
+                .is_none_or(|class| class.generic_context(db).is_none())
                 .then(Type::unknown)
         })
     }

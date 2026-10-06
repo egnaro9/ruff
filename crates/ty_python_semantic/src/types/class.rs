@@ -780,8 +780,12 @@ impl<'db> ClassLiteral<'db> {
             | Self::DynamicTypedDict(_)
             | Self::DynamicEnum(_) => {
                 // Dynamic classes don't have inherited generic context and are never `object`.
-                let result =
-                    MroLookup::new(db, env, mro_iter).class_member(name, policy, None, false);
+                let result = MroLookup::new(db, env, mro_iter).class_member(
+                    name,
+                    policy,
+                    GenericContext::None,
+                    false,
+                );
                 match result {
                     ClassMemberResult::Done(result) => result.finalize(db, env),
                     ClassMemberResult::TypedDict(module) => {
@@ -829,8 +833,9 @@ impl<'db> ClassLiteral<'db> {
     }
 
     /// Returns the generic context if this is a generic class.
-    pub(crate) fn generic_context(self, db: &'db dyn Db) -> Option<GenericContext<'db>> {
-        self.as_static().and_then(|class| class.generic_context(db))
+    pub(crate) fn generic_context(self, db: &'db dyn Db) -> GenericContext<'db> {
+        self.as_static()
+            .map_or(GenericContext::None, |class| class.generic_context(db))
     }
 
     /// Returns whether this class is a protocol.
@@ -1925,7 +1930,7 @@ impl<'db> ClassType<'db> {
         self,
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
-        inherited_generic_context: Option<GenericContext<'db>>,
+        inherited_generic_context: GenericContext<'db>,
         name: &str,
     ) -> Member<'db> {
         fn synthesize_getitem_overload_signature<'db>(
@@ -2405,7 +2410,9 @@ impl<'db> ClassType<'db> {
         // Dynamic classes don't have a generic context.
         let class_generic_context = self
             .static_class_literal(db)
-            .and_then(|(class_literal, _)| class_literal.generic_context(db));
+            .map_or(GenericContext::None, |(class_literal, _)| {
+                class_literal.generic_context(db)
+            });
 
         let lookup_type = Type::from(self);
         let instance_type = receiver
@@ -2509,11 +2516,8 @@ impl<'db> ClassType<'db> {
                                 .is_none_or(|bound_typevar| !bound_typevar.typevar(db).is_self(db))
                         });
                     let return_type = self_annotation.unwrap_or(instance_type);
-                    let generic_context = GenericContext::merge_optional(
-                        db,
-                        class_generic_context,
-                        signature.generic_context,
-                    );
+                    let generic_context =
+                        class_generic_context.merge(db, signature.generic_context);
                     Signature::new_generic(
                         generic_context,
                         signature.parameters().clone(),
@@ -2573,7 +2577,7 @@ impl<'db> ClassType<'db> {
                     ..
                 }) = new_function_symbol
                 {
-                    if let Some(class_generic_context) = class_generic_context {
+                    if class_generic_context.is_some() {
                         new_function =
                             new_function.with_inherited_generic_context(db, class_generic_context);
                     }
@@ -3046,7 +3050,7 @@ impl<'db, I: Iterator<Item = ClassBase<'db>>> MroLookup<'db, I> {
         self,
         name: &str,
         policy: MemberLookupPolicy,
-        inherited_generic_context: Option<GenericContext<'db>>,
+        inherited_generic_context: GenericContext<'db>,
         is_self_object: bool,
     ) -> ClassMemberResult<'db> {
         let db = self.db;
@@ -3253,7 +3257,7 @@ impl<'db, I: Iterator<Item = ClassBase<'db>>> MroLookup<'db, I> {
                                         }),
                                     ..
                                 },
-                        } = class.own_class_member(db, &self.env, None, name)
+                        } = class.own_class_member(db, &self.env, GenericContext::None, name)
                     {
                         if !class_member_ty.is_definitely_non_data_descriptor(db, &self.env) {
                             pending_augmented_bindings.clear();

@@ -204,10 +204,12 @@ impl<'db> RecursiveType<'db> {
         db: &'db dyn Db,
         definition: Definition<'db>,
         cycle: salsa::Id,
-        parameters: Option<GenericContext<'db>>,
+        parameters: GenericContext<'db>,
     ) -> Self {
         let cycle = RecursiveCycle(cycle);
-        let arguments = parameters.map(|parameters| parameters.identity_specialization(db));
+        let arguments = parameters
+            .is_some()
+            .then(|| parameters.identity_specialization(db));
         Self::new_internal(
             db,
             definition,
@@ -223,7 +225,7 @@ impl<'db> RecursiveType<'db> {
         db: &'db dyn Db,
         definition: Definition<'db>,
         cycle: salsa::Id,
-        parameters: Option<GenericContext<'db>>,
+        parameters: GenericContext<'db>,
         result: Type<'db>,
     ) -> Type<'db> {
         // Shared dependencies can still contain older iterations of this alias. They refer
@@ -297,9 +299,11 @@ impl<'db> RecursiveType<'db> {
     }
 
     /// Parameters bound by this recursive type constructor.
-    pub(super) fn parameters(self, db: &'db dyn Db) -> Option<GenericContext<'db>> {
+    pub(super) fn parameters(self, db: &'db dyn Db) -> GenericContext<'db> {
         self.arguments(db)
-            .map(|arguments| arguments.generic_context(db))
+            .map_or(GenericContext::None, |arguments| {
+                arguments.generic_context(db)
+            })
     }
 
     /// The declared alias name, shared by all specializations of this constructor.
@@ -328,7 +332,8 @@ impl<'db> RecursiveType<'db> {
         self.with_materialization(db, None).with_arguments(
             db,
             self.parameters(db)
-                .map(|parameters| parameters.identity_specialization(db)),
+                .is_some()
+                .then(|| self.parameters(db).identity_specialization(db)),
         )
     }
 

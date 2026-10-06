@@ -18,8 +18,8 @@ use crate::{
     lint::LintId,
     place::{DefinedPlace, Place, PlaceAndQualifiers, TypeOrigin},
     types::{
-        CallableType, ClassBase, ClassLiteral, ClassType, IntersectionType, KnownClass,
-        MemberLookupPolicy, Parameter, Parameters, Signature, StaticClassLiteral, Type,
+        CallableType, ClassBase, ClassLiteral, ClassType, GenericContext, IntersectionType,
+        KnownClass, MemberLookupPolicy, Parameter, Parameters, Signature, StaticClassLiteral, Type,
         TypeContext, TypeQualifiers,
         call::CallArguments,
         class::{CodeGeneratorKind, FieldKind, MethodDecorator},
@@ -367,7 +367,7 @@ fn source_method_contract<'db>(
     // class Conflict(ReturnsStr, ReturnsInt): ...
     // ```
     let Type::FunctionLiteral(function) = owner
-        .own_class_member(db, env, None, name)
+        .own_class_member(db, env, GenericContext::None, name)
         .inner
         .place
         .raw_type()?
@@ -695,7 +695,7 @@ fn check_class_declaration<'db>(
                                 db,
                                 env,
                                 superclass_specialization,
-                                None,
+                                GenericContext::None,
                                 &member.name,
                             )
                             .is_none()
@@ -713,7 +713,7 @@ fn check_class_declaration<'db>(
                     superclass.class_literal(db),
                     ClassLiteral::DynamicNamedTuple(_)
                 ) && !superclass
-                    .own_class_member(db, env, None, &member.name)
+                    .own_class_member(db, env, GenericContext::None, &member.name)
                     .is_undefined()
                 {
                     (None, MethodKind::Synthesized(CodeGeneratorKind::NamedTuple))
@@ -754,7 +754,8 @@ fn check_class_declaration<'db>(
                 || (configuration.check_final_variable_overridden()
                     && overridden_final_variable.is_none())
             {
-                let own_class_member = superclass.own_class_member(db, env, None, &member.name);
+                let own_class_member =
+                    superclass.own_class_member(db, env, GenericContext::None, &member.name);
 
                 if configuration.check_final_method_overridden() {
                     overridden_final_method = overridden_final_method.or_else(|| {
@@ -830,7 +831,9 @@ fn check_class_declaration<'db>(
                         variable_kind(
                             db,
                             env,
-                            class.own_class_member(db, env, None, &member.name).inner,
+                            class
+                                .own_class_member(db, env, GenericContext::None, &member.name)
+                                .inner,
                             subclass_instance_member,
                         )
                     });
@@ -1268,7 +1271,13 @@ pub(super) fn effective_superclass_variable_kind<'db>(
         superclass_symbol.is_bound() || superclass_symbol.is_declared()
     } else {
         superclass_literal
-            .own_synthesized_member(db, env, superclass_specialization, None, &name)
+            .own_synthesized_member(
+                db,
+                env,
+                superclass_specialization,
+                GenericContext::None,
+                &name,
+            )
             .is_some()
     };
 
@@ -1283,7 +1292,9 @@ pub(super) fn effective_superclass_variable_kind<'db>(
             return inherited_variable_kind();
         }
 
-        let class_member = superclass.own_class_member(db, env, None, &name).inner;
+        let class_member = superclass
+            .own_class_member(db, env, GenericContext::None, &name)
+            .inner;
 
         // Final attributes have their own override rule and diagnostic. Treating them as class
         // variables here would report both diagnostics for the same override.

@@ -230,12 +230,8 @@ impl<'db> DisplaySettings<'db> {
     }
 
     #[must_use]
-    fn with_generic_context(
-        &self,
-        db: &'db dyn Db,
-        generic_context: Option<&GenericContext<'db>>,
-    ) -> Self {
-        if let Some(generic_context) = generic_context {
+    fn with_generic_context(&self, db: &'db dyn Db, generic_context: GenericContext<'db>) -> Self {
+        if let generic_context @ GenericContext::Some(_) = generic_context {
             self.with_active_scopes(
                 generic_context
                     .variables(db)
@@ -1083,7 +1079,7 @@ struct DisplayTypeAliasDeclaration<'env, 'db> {
     db: &'db dyn Db,
     env: &'env ProgramEnvironment<'db>,
     type_alias: TypeAliasDisplay<'db>,
-    generic_context: Option<GenericContext<'db>>,
+    generic_context: GenericContext<'db>,
     value_ty: Type<'db>,
 }
 
@@ -1093,14 +1089,14 @@ impl<'db> FmtDetailed<'db> for DisplayTypeAliasDeclaration<'_, 'db> {
         let settings = self
             .type_alias
             .settings
-            .with_generic_context(db, self.generic_context.as_ref());
+            .with_generic_context(db, self.generic_context);
         let explicit_alias = matches!(self.type_alias.ty, Type::TypeAlias(_));
 
         if explicit_alias {
             f.write_str("type ")?;
         }
         self.type_alias.fmt_detailed(f)?;
-        if explicit_alias && let Some(generic_context) = self.generic_context {
+        if explicit_alias && let generic_context @ GenericContext::Some(_) = self.generic_context {
             generic_context.display(db).fmt_detailed(f)?;
         }
         f.write_str(" = ")?;
@@ -1390,9 +1386,10 @@ impl<'db> FmtDetailed<'db> for DisplayRepresentation<'_, 'db> {
                     [signature] => {
                         let hide_unused_self =
                             signature.should_hide_self_from_display(db, self.env);
-                        let type_parameters = DisplayOptionalGenericContext {
-                            generic_context: signature.generic_context.as_ref(),
+                        let type_parameters = DisplayGenericContext {
+                            generic_context: &signature.generic_context,
                             db,
+                            full: false,
                             hide_unused_self,
                         };
                         f.set_invalid_type_annotation();
@@ -1979,9 +1976,10 @@ impl<'db> FmtDetailed<'db> for DisplayOverloadLiteral<'_, 'db> {
         let db = self.db;
         let signature = self.literal.signature(db);
         let hide_unused_self = signature.should_hide_self_from_display(db, self.env);
-        let type_parameters = DisplayOptionalGenericContext {
-            generic_context: signature.generic_context.as_ref(),
+        let type_parameters = DisplayGenericContext {
+            generic_context: &signature.generic_context,
             db,
+            full: false,
             hide_unused_self,
         };
 
@@ -2050,9 +2048,10 @@ impl<'db> FmtDetailed<'db> for DisplayFunctionType<'_, 'db> {
             [signature] => {
                 let hide_unused_self = signature.should_hide_self_from_display(db, self.env);
 
-                let type_parameters = DisplayOptionalGenericContext {
-                    generic_context: signature.generic_context.as_ref(),
+                let type_parameters = DisplayGenericContext {
+                    generic_context: &signature.generic_context,
                     db,
+                    full: false,
                     hide_unused_self,
                 };
                 f.set_invalid_type_annotation();
@@ -2188,41 +2187,12 @@ impl<'db> GenericContext<'db> {
     }
 }
 
-struct DisplayOptionalGenericContext<'a, 'db> {
-    generic_context: Option<&'a GenericContext<'db>>,
-    db: &'db dyn Db,
-    /// If true, hide `Self` type variables from the generic context prefix
-    /// when they are not displayed in the signature body.
-    hide_unused_self: bool,
-}
-
-impl<'db> FmtDetailed<'db> for DisplayOptionalGenericContext<'_, 'db> {
-    fn fmt_detailed(&self, f: &mut TypeWriter<'_, '_, 'db>) -> fmt::Result {
-        if let Some(generic_context) = self.generic_context {
-            DisplayGenericContext {
-                generic_context,
-                db: self.db,
-                full: false,
-                hide_unused_self: self.hide_unused_self,
-            }
-            .fmt_detailed(f)
-        } else {
-            Ok(())
-        }
-    }
-}
-
-impl Display for DisplayOptionalGenericContext<'_, '_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::Formatter(f))
-    }
-}
-
 struct DisplayGenericContext<'a, 'db> {
     generic_context: &'a GenericContext<'db>,
     db: &'db dyn Db,
     full: bool,
-    /// If true, hide `Self` type variables from the generic context prefix.
+    /// If true, hide `Self` type variables from the generic context prefix
+    /// when they are not displayed in the signature body.
     hide_unused_self: bool,
 }
 
@@ -2590,7 +2560,7 @@ impl<'db> Signature<'db> {
     ) -> DisplaySignature<'a, 'db> {
         DisplaySignature {
             definition: self.definition(),
-            generic_context: self.generic_context.as_ref(),
+            generic_context: self.generic_context,
             parameters: self.parameters(),
             return_ty: self.return_ty,
             db,
@@ -2602,7 +2572,7 @@ impl<'db> Signature<'db> {
 
 pub(crate) struct DisplaySignature<'a, 'db> {
     definition: Option<Definition<'db>>,
-    generic_context: Option<&'a GenericContext<'db>>,
+    generic_context: GenericContext<'db>,
     parameters: &'a Parameters<'db>,
     return_ty: Type<'db>,
     db: &'db dyn Db,
@@ -2694,9 +2664,10 @@ impl<'db> FmtDetailed<'db> for DisplaySignature<'_, 'db> {
         {
             let hide_unused_self = self.should_hide_self_from_display();
 
-            DisplayOptionalGenericContext {
-                generic_context: self.generic_context,
+            DisplayGenericContext {
+                generic_context: &self.generic_context,
                 db,
+                full: false,
                 hide_unused_self,
             }
             .fmt_detailed(&mut f)?;

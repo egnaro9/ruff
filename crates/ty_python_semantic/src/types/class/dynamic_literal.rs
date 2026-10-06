@@ -7,8 +7,8 @@ use crate::{
     Db, TypeQualifiers,
     place::{Place, PlaceAndQualifiers},
     types::{
-        ClassBase, ClassLiteral, ClassType, DataclassParams, KnownClass, MemberLookupPolicy,
-        SubclassOfType, Type,
+        ClassBase, ClassLiteral, ClassType, DataclassParams, GenericContext, KnownClass,
+        MemberLookupPolicy, SubclassOfType, Type,
         class::{
             ClassMemberResult, ClassMetaclass, CodeGeneratorKind, DisjointBase,
             DynamicClassHeaderAnchor, DynamicClassScopeOffset, InstanceMemberResult, MroLookup,
@@ -437,8 +437,10 @@ impl<'db> DynamicClassLiteral<'db> {
         }
 
         let result = MroLookup::new(db, env, self.iter_mro(db)).class_member(
-            name, policy, None,  // No inherited generic context.
-            false, // Dynamic classes are never `object`.
+            name,
+            policy,
+            GenericContext::None, // No inherited generic context.
+            false,                // Dynamic classes are never `object`.
         );
 
         match result {

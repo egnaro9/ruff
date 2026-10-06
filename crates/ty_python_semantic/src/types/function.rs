@@ -634,9 +634,12 @@ impl<'db> OverloadLiteral<'db> {
         let function_stmt_node = scope.node(db).expect_function().node(&module);
         let definition = self.definition(db);
         let index = semantic_index(db, program_file);
-        let pep695_ctx = function_stmt_node.type_params.as_ref().map(|type_params| {
-            GenericContext::from_type_params(db, index, definition, type_params)
-        });
+        let pep695_ctx = function_stmt_node
+            .type_params
+            .as_ref()
+            .map_or(GenericContext::None, |type_params| {
+                GenericContext::from_type_params(db, index, definition, type_params)
+            });
         let file_scope_id = scope.file_scope_id(db);
 
         let has_implicitly_positional_first_parameter = has_implicitly_positional_only_first_param(
@@ -668,7 +671,8 @@ impl<'db> OverloadLiteral<'db> {
             // typevars that currently appear in the method's generic context come from explicit
             // annotations.
             let method_has_explicit_self = generic_context
-                .is_some_and(|context| context.variables(db).any(|v| v.typevar(db).is_self(db)));
+                .variables(db)
+                .any(|v| v.typevar(db).is_self(db));
 
             let class_scope_id = definition.scope(db);
             let class_scope = index.scope(class_scope_id.file_scope_id(db));

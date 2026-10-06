@@ -105,14 +105,14 @@ pub(super) struct CyclicTypeAliasError<'db> {
 /// which recursive references remain in the recovered type.
 #[salsa::tracked(
     returns(ref),
-    cycle_initial=|db, id, definition: Definition<'db>, parameters: Option<crate::types::GenericContext<'db>>| {
+    cycle_initial=|db, id, definition: Definition<'db>, parameters: crate::types::GenericContext<'db>| {
         ImplicitAliasInference {
             ty: Ok(Type::Recursive(RecursiveType::initial(db, definition, id, parameters))),
             diagnostics: TypeCheckDiagnostics::default(),
             implicit_aliases: Box::default(),
         }
     },
-    cycle_fn=|db, cycle: &salsa::Cycle, _: &ImplicitAliasInference<'db>, mut result: ImplicitAliasInference<'db>, definition: Definition<'db>, parameters: Option<crate::types::GenericContext<'db>>| {
+    cycle_fn=|db, cycle: &salsa::Cycle, _: &ImplicitAliasInference<'db>, mut result: ImplicitAliasInference<'db>, definition: Definition<'db>, parameters: crate::types::GenericContext<'db>| {
         let recover = |ty| RecursiveType::recover(db, definition, cycle.id(), parameters, ty);
         result.ty = result.ty.map(recover).map_err(|error| CyclicTypeAliasError {
             fallback_type: recover(error.fallback_type),
@@ -124,7 +124,7 @@ pub(super) struct CyclicTypeAliasError<'db> {
 pub(super) fn infer_implicit_alias_type<'db>(
     db: &'db dyn Db,
     definition: Definition<'db>,
-    _parameters: Option<crate::types::GenericContext<'db>>,
+    _parameters: crate::types::GenericContext<'db>,
 ) -> ImplicitAliasInference<'db> {
     let program_file = definition.program_file(db);
     let python_file = program_file.python_file(db);

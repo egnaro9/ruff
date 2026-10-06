@@ -25,9 +25,9 @@ use crate::types::known_instance::FieldInstance;
 use crate::types::member::class_member;
 use crate::types::special_form::SpecialFormType;
 use crate::types::{
-    ClassBase, ClassType, DataclassTransformerParams, FunctionType, KnownClass, KnownFunction,
-    KnownInstanceType, KnownUnion, Parameter, Specialization, StaticClassLiteral, Type, UnionType,
-    definition_expression_type,
+    ClassBase, ClassType, DataclassTransformerParams, FunctionType, GenericContext, KnownClass,
+    KnownFunction, KnownInstanceType, KnownUnion, Parameter, Specialization, StaticClassLiteral,
+    Type, UnionType, definition_expression_type,
 };
 
 /// Pydantic treats underscore-prefixed annotations as private instance attributes.
@@ -537,7 +537,7 @@ pub(in crate::types) fn setattr_behavior(
             });
         }
         if !base_class
-            .own_class_member(db, env, None, "__setattr__")
+            .own_class_member(db, env, GenericContext::None, "__setattr__")
             .is_undefined()
         {
             return Some(SetAttrBehavior::CustomSetAttr);

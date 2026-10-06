@@ -12,8 +12,8 @@ use crate::{
     place::{DefinedPlace, Place, TypeOrigin, place_from_bindings, place_from_declarations},
     types::{
         CallArguments, ClassBase, ClassLiteral, ClassType, DataclassFlags, DisplaySettings,
-        KnownClass, KnownInstanceType, MemberLookupPolicy, MetaclassCandidate, SpecialFormType,
-        StaticClassLiteral, Type, TypeVarVariance, TypingModule,
+        GenericContext, KnownClass, KnownInstanceType, MemberLookupPolicy, MetaclassCandidate,
+        SpecialFormType, StaticClassLiteral, Type, TypeVarVariance, TypingModule,
         abstract_methods::AbstractMethods,
         binding_type,
         call::Argument,
@@ -404,7 +404,7 @@ pub(crate) fn check_static_class_definitions<'db>(
             Type::ClassLiteral(class) => ClassType::NonGeneric(class),
             Type::GenericAlias(base_alias) => {
                 if check_explicit_base_variance
-                    && let Some(generic_context) = class.generic_context(db)
+                    && let generic_context @ GenericContext::Some(_) = class.generic_context(db)
                     && let Some((typevar, declared_variance, required_variance)) =
                         generic_context.variables(db).find_map(|typevar| {
                             let declared_variance = typevar.typevar(db).explicit_variance(db)?;
@@ -853,7 +853,8 @@ pub(crate) fn check_static_class_definitions<'db>(
     // If the class is generic, verify that its generic context does not violate any of
     // the typevar scoping rules.
     if class.has_pep_695_type_params(db)
-        && let Some(generic_context) = class.inherited_legacy_generic_context(db)
+        && let generic_context @ GenericContext::Some(_) =
+            class.inherited_legacy_generic_context(db)
         && let Some(typevar) = generic_context
             .variables(db)
             .find(|typevar| !typevar.typevar(db).is_self(db))
@@ -865,18 +866,16 @@ pub(crate) fn check_static_class_definitions<'db>(
         ));
     }
 
-    if let (Some(legacy), Some(inherited)) = (
+    if let (legacy @ GenericContext::Some(_), inherited @ GenericContext::Some(_)) = (
         class.legacy_generic_context(db),
         class.inherited_legacy_generic_context(db),
-    ) {
-        if !inherited.is_subset_of(db, legacy)
-            && let Some(builder) = context.report_lint(&INVALID_GENERIC_CLASS, class_node)
-        {
-            builder.into_diagnostic(
-                "`Generic` base class must include all type \
+    ) && !inherited.is_subset_of(db, legacy)
+        && let Some(builder) = context.report_lint(&INVALID_GENERIC_CLASS, class_node)
+    {
+        builder.into_diagnostic(
+            "`Generic` base class must include all type \
                     variables used in other base classes",
-            );
-        }
+        );
     }
 
     // Check that no type parameter with a default follows a TypeVarTuple.
@@ -896,7 +895,7 @@ pub(crate) fn check_static_class_definitions<'db>(
 
     if context.is_lint_enabled(&INVALID_GENERIC_CLASS) {
         if !class.has_pep_695_type_params(db)
-            && let Some(generic_context) = class.legacy_generic_context(db)
+            && let generic_context @ GenericContext::Some(_) = class.legacy_generic_context(db)
         {
             struct State<'db> {
                 typevar_with_default: TypeVarInstance<'db>,
@@ -936,7 +935,7 @@ pub(crate) fn check_static_class_definitions<'db>(
 
         // Check that type variable defaults only reference type variables
         // that precede them in the type parameter list.
-        if let Some(generic_context) = class
+        if let generic_context @ GenericContext::Some(_) = class
             .pep695_generic_context(db)
             .or_else(|| class.legacy_generic_context(db))
         {
@@ -978,7 +977,7 @@ pub(crate) fn check_static_class_definitions<'db>(
         if let Some(parent) = scope.parent() {
             // Check that the class's own type parameters don't shadow
             // type variables from enclosing scopes (by name).
-            if let Some(generic_context) = class.generic_context(db) {
+            if let generic_context @ GenericContext::Some(_) = class.generic_context(db) {
                 for self_typevar in generic_context.variables(db) {
                     let name = self_typevar.typevar(db).name(db);
                     for enclosing in enclosing_generic_contexts(db, index, parent) {

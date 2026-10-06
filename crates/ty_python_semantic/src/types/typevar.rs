@@ -511,7 +511,7 @@ impl<'db> TypeVarInstance<'db> {
                 {
                     return true;
                 }
-            } else if let Some(generic_context) = type_alias.generic_context(db)
+            } else if let generic_context @ GenericContext::Some(_) = type_alias.generic_context(db)
                 && generic_context.variables(db).any(|typevar| {
                     typevar_default_is_self_referential(state, typevar.typevar(db), self_identity)
                 })
@@ -835,7 +835,7 @@ impl<'db> TypeVarInstance<'db> {
         let (_, child) = index
             .child_scopes(typevar_definition.file_scope(db))
             .next()?;
-        GenericContext::of_node(db, child.node(), index)?.binds_typevar(db, self)
+        GenericContext::of_node(db, child.node(), index).binds_typevar(db, self)
     }
 }
 
@@ -1003,7 +1003,7 @@ pub(crate) fn max_typevar_freshness_matching_generic_context<'db>(
         }
     }
 
-    let env = ProgramEnvironment::from_program(generic_context.program(db));
+    let env = ProgramEnvironment::from_program(generic_context.program(db)?);
     let collector = MatchingFreshnessCollector::new(db, &env, generic_context);
     for ty in types {
         collector.visit_type(db, ty);

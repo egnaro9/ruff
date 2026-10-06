@@ -254,7 +254,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     )));
                 }
 
-                if let Some(generic_context) = class.generic_context(db)
+                if let generic_context @ GenericContext::Some(_) = class.generic_context(db)
                     && let Some(class) = class.as_static()
                 {
                     return Ok(self.infer_explicit_class_specialization(
@@ -266,7 +266,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 }
             }
             Type::KnownInstance(KnownInstanceType::TypeAliasType(type_alias)) => {
-                if let Some(generic_context) = type_alias.generic_context(db) {
+                if let generic_context @ GenericContext::Some(_) = type_alias.generic_context(db) {
                     return Ok(self.infer_explicit_type_alias_type_specialization(
                         subscript,
                         value_ty,
@@ -2433,7 +2433,7 @@ enum LegacyGenericContextError<'db> {
     ///
     /// The generic context is available when the argument is a bound `TypeVarTuple` and is used
     /// to avoid cascading errors during recovery.
-    TypeVarTupleMustBeUnpacked(Option<GenericContext<'db>>),
+    TypeVarTupleMustBeUnpacked(GenericContext<'db>),
 }
 
 impl<'db> LegacyGenericContextError<'db> {
@@ -2488,9 +2488,11 @@ fn infer_legacy_generic_subscript<'db>(
         )),
         Err(LegacyGenericContextError::TypeVarTupleMustBeUnpacked(generic_context)) => {
             Err(SubscriptError::new(
-                generic_context.map_or(Type::unknown(), |generic_context| {
+                if generic_context.is_none() {
+                    Type::unknown()
+                } else {
                     Type::KnownInstance(wrap_ok(generic_context))
-                }),
+                },
                 SubscriptErrorKind::TypeVarTupleNotUnpacked { origin },
             ))
         }
@@ -2542,9 +2544,9 @@ fn legacy_generic_class_context<'db>(
                 .ok_or(LegacyGenericContextError::InvalidArgument(argument_ty))?;
             if bound.is_typevartuple(db) {
                 validated_typevars.insert(bound);
-                return Err(LegacyGenericContextError::TypeVarTupleMustBeUnpacked(Some(
+                return Err(LegacyGenericContextError::TypeVarTupleMustBeUnpacked(
                     GenericContext::from_typevar_instances(db, env, validated_typevars),
-                )));
+                ));
             }
             if !validated_typevars.insert(bound) {
                 return Err(LegacyGenericContextError::DuplicateTypevar(
@@ -2563,7 +2565,9 @@ fn legacy_generic_class_context<'db>(
                 Some(KnownClass::TypeVarTuple | KnownClass::ExtensionsTypeVarTuple)
             )
         {
-            return Err(LegacyGenericContextError::TypeVarTupleMustBeUnpacked(None));
+            return Err(LegacyGenericContextError::TypeVarTupleMustBeUnpacked(
+                GenericContext::None,
+            ));
         } else if any_over_type(db, env, argument_ty, true, |inner_ty| match inner_ty {
             Type::NominalInstance(nominal) => matches!(
                 nominal.known_class(db),

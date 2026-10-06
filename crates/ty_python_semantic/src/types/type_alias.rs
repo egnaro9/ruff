@@ -70,9 +70,10 @@ impl<'db> AliasCycleSummary<'db> {
                     return summary.cycle;
                 }
                 let specialization = alias.specialization(db).or_else(|| {
-                    alias
-                        .generic_context(db)
-                        .map(|context| context.default_specialization(db, None))
+                    let context = alias.generic_context(db);
+                    context
+                        .is_some()
+                        .then(|| context.default_specialization(db, None))
                 });
 
                 summary.collect_exposed_arguments(db, specialization, typevars)
@@ -236,9 +237,9 @@ impl<'db> PEP695TypeAliasType<'db> {
         f: impl FnOnce(GenericContext<'db>) -> Specialization<'db>,
     ) -> PEP695TypeAliasType<'db> {
         match self.generic_context(db) {
-            None => self,
+            GenericContext::None => self,
 
-            Some(generic_context) => {
+            generic_context @ GenericContext::Some(_) => {
                 // Note that at runtime, a specialized type alias is an instance of `typing.GenericAlias`.
                 // However, the `GenericAlias` type in ty is heavily special cased to refer to specialized
                 // class literals, so we instead represent specialized type aliases as instances of
@@ -256,8 +257,8 @@ impl<'db> PEP695TypeAliasType<'db> {
         }
     }
 
-    #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| None, heap_size=ruff_memory_usage::heap_size)]
-    pub(crate) fn generic_context(self, db: &'db dyn Db) -> Option<GenericContext<'db>> {
+    #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| GenericContext::None, heap_size=ruff_memory_usage::heap_size)]
+    pub(crate) fn generic_context(self, db: &'db dyn Db) -> GenericContext<'db> {
         let scope = self.rhs_scope(db);
         let program_file = scope.program_file(db);
         let python_file = program_file.python_file(db);
@@ -268,7 +269,7 @@ impl<'db> PEP695TypeAliasType<'db> {
             .node(&parsed)
             .type_params
             .as_ref()
-            .map(|type_params| {
+            .map_or(GenericContext::None, |type_params| {
                 let index = semantic_index(db, program_file);
                 let definition = index.expect_single_definition(type_alias_stmt_node);
                 GenericContext::from_type_params(db, index, definition, type_params)
@@ -353,7 +354,7 @@ impl<'db> ManualPEP695TypeAliasType<'db> {
         db: &'db dyn Db,
         f: impl FnOnce(GenericContext<'db>) -> Specialization<'db>,
     ) -> Self {
-        let Some(generic_context) = self.generic_context(db) else {
+        let generic_context @ GenericContext::Some(_) = self.generic_context(db) else {
             return self;
         };
 
@@ -367,22 +368,25 @@ impl<'db> ManualPEP695TypeAliasType<'db> {
         )
     }
 
-    #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| None, heap_size=ruff_memory_usage::heap_size)]
-    pub(crate) fn generic_context(self, db: &'db dyn Db) -> Option<GenericContext<'db>> {
+    #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| GenericContext::None, heap_size=ruff_memory_usage::heap_size)]
+    pub(crate) fn generic_context(self, db: &'db dyn Db) -> GenericContext<'db> {
         let definition = self.definition(db);
         let file = definition.program_file(db);
         let env = ProgramEnvironment::from_file(file);
         let module = parsed_module(db, file.python_file(db)).load(db);
         let DefinitionKind::Assignment(assignment) = definition.kind(db) else {
-            return None;
+            return GenericContext::None;
         };
         let ast::Expr::Call(call) = assignment.value(&module) else {
-            return None;
+            return GenericContext::None;
         };
-        let type_params = call
+        let Some(type_params) = call
             .arguments
-            .find_argument_value("type_params", 2)?
-            .as_tuple_expr()?;
+            .find_argument_value("type_params", 2)
+            .and_then(ast::Expr::as_tuple_expr)
+        else {
+            return GenericContext::None;
+        };
         let index = semantic_index(db, file);
 
         let mut variables = FxOrderSet::default();
@@ -394,31 +398,34 @@ impl<'db> ManualPEP695TypeAliasType<'db> {
                     definition.file_scope(db),
                     Some(definition),
                     typevar,
-                )?,
-                _ => return None,
+                ),
+                _ => return GenericContext::None,
+            };
+            let Some(typevar) = typevar else {
+                return GenericContext::None;
             };
             if typevar.binding_context(db) != BindingContext::Definition(definition) {
-                return None;
+                return GenericContext::None;
             }
             variables.insert(typevar);
         }
 
-        (!variables.is_empty()).then(|| GenericContext::from_typevar_instances(db, &env, variables))
+        GenericContext::from_typevar_instances(db, &env, variables)
     }
 }
 
 fn apply_type_alias_specialization<'db>(
     db: &'db dyn Db,
     ty: Type<'db>,
-    generic_context: Option<GenericContext<'db>>,
+    generic_context: GenericContext<'db>,
     specialization: Option<Specialization<'db>>,
     recursion_context: Option<&TypeRecursionContext<'db>>,
 ) -> Type<'db> {
-    let Some(generic_context) = generic_context else {
+    let Some(program) = generic_context.program(db) else {
         return ty;
     };
 
-    let env = ProgramEnvironment::from_program(generic_context.program(db));
+    let env = ProgramEnvironment::from_program(program);
     let specialization =
         specialization.unwrap_or_else(|| generic_context.default_specialization(db, None));
     let type_mapping = match specialization.materialization_kind(db) {
@@ -677,7 +684,7 @@ impl<'db> TypeAliasType<'db> {
         }
     }
 
-    pub(crate) fn generic_context(self, db: &'db dyn Db) -> Option<GenericContext<'db>> {
+    pub(crate) fn generic_context(self, db: &'db dyn Db) -> GenericContext<'db> {
         match self {
             TypeAliasType::PEP695(type_alias) => type_alias.generic_context(db),
             TypeAliasType::ManualPEP695(type_alias) => type_alias.generic_context(db),
@@ -845,7 +852,7 @@ impl<'db> TypeAliasType<'db> {
         typevar: BoundTypeVarIdentity<'db>,
     ) -> VarianceTerm<'db> {
         let env = ProgramEnvironment::from_definition(self.definition(db));
-        let Some(generic_context) = self.generic_context(db) else {
+        let generic_context @ GenericContext::Some(_) = self.generic_context(db) else {
             return self.value_type(db).variance_of(db, &env, typevar);
         };
 

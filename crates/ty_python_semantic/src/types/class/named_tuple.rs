@@ -32,7 +32,7 @@ pub(super) fn synthesize_namedtuple_class_member<'db>(
     name: &str,
     instance_ty: Type<'db>,
     fields: impl Iterator<Item = NamedTupleField<'db>>,
-    inherited_generic_context: Option<GenericContext<'db>>,
+    inherited_generic_context: GenericContext<'db>,
 ) -> Option<Type<'db>> {
     match name {
         "__new__" => {
@@ -45,8 +45,7 @@ pub(super) fn synthesize_namedtuple_class_member<'db>(
             let self_ty = Type::TypeVar(self_typevar);
 
             let variables = inherited_generic_context
-                .iter()
-                .flat_map(|ctx| ctx.variables(db))
+                .variables(db)
                 .chain(std::iter::once(self_typevar));
 
             let generic_context = GenericContext::from_typevar_instances(db, env, variables);
@@ -63,11 +62,8 @@ pub(super) fn synthesize_namedtuple_class_member<'db>(
                     .with_definition(field.definition)
             }));
 
-            let signature = Signature::new_generic(
-                Some(generic_context),
-                Parameters::standard(parameters),
-                self_ty,
-            );
+            let signature =
+                Signature::new_generic(generic_context, Parameters::standard(parameters), self_ty);
             Some(Type::function_like_callable(db, signature))
         }
         "__match_args__" => {
@@ -391,7 +387,7 @@ impl<'db> DynamicNamedTupleLiteral<'db> {
                         .to_class_literal(db, env)
                         .as_class_literal()?
                         .as_static()?
-                        .own_class_member(db, env, None, None, name)
+                        .own_class_member(db, env, GenericContext::None, None, name)
                         .ignore_possibly_undefined()
                         .map(|ty| {
                             ty.apply_type_mapping(
@@ -414,7 +410,7 @@ impl<'db> DynamicNamedTupleLiteral<'db> {
             name,
             instance_ty,
             self.fields(db).iter().cloned(),
-            None,
+            GenericContext::None,
         );
         // For fallback members from NamedTupleFallback, apply type mapping to handle
         // `Self` types. The explicitly synthesized members (__new__, _fields, _replace,

@@ -14,7 +14,7 @@ use crate::{
     reachability::DeclarationsIteratorExtension,
     types::{
         ApplyTypeMappingVisitor, ClassBase, ClassLiteral, DynamicType, EnumLiteralType,
-        IntersectionType, KnownClass, LiteralValueTypeKind, MemberLookupPolicy,
+        GenericContext, IntersectionType, KnownClass, LiteralValueTypeKind, MemberLookupPolicy,
         NegativeIntersectionElements, StaticClassLiteral, Type, TypeContext, TypeMapping,
         UnionType, binding_type,
         function::FunctionType,
@@ -283,7 +283,7 @@ pub(super) fn class_defines_property<'db>(
             return false;
         }
         if let Some(member) = base
-            .own_class_member(db, env, None, name)
+            .own_class_member(db, env, GenericContext::None, name)
             .inner
             .place
             .raw_type()

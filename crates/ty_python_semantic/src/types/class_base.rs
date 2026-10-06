@@ -437,9 +437,10 @@ impl<'db> ClassBase<'db> {
         db: &'db dyn Db,
         specialization: Option<Specialization<'db>>,
     ) -> Self {
-        if let Some(specialization) = specialization {
-            let env =
-                &ProgramEnvironment::from_program(specialization.generic_context(db).program(db));
+        if let Some(specialization) = specialization
+            && let Some(program) = specialization.generic_context(db).program(db)
+        {
+            let env = &ProgramEnvironment::from_program(program);
             let new_self = self.apply_type_mapping_impl(
                 db,
                 &TypeMapping::ApplySpecialization(ApplySpecialization::specialization(

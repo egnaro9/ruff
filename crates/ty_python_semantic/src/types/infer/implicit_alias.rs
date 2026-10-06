@@ -29,14 +29,16 @@ use crate::{Db, FxOrderSet, ProgramEnvironment};
 /// This can seed a separate non-generic alias query while parameter discovery is incomplete.
 /// Parameters are part of the alias query's key: discovering them later selects a generic
 /// constructor rather than reusing that provisional non-generic value.
-#[salsa::tracked(returns(copy), cycle_initial=|_, _, _| None, heap_size=ruff_memory_usage::heap_size)]
+#[salsa::tracked(returns(copy), cycle_initial=|_, _, _| GenericContext::None, heap_size=ruff_memory_usage::heap_size)]
 pub(in crate::types) fn implicit_alias_parameters<'db>(
     db: &'db dyn Db,
     definition: Definition<'db>,
-) -> Option<GenericContext<'db>> {
+) -> GenericContext<'db> {
     let file = definition.program_file(db);
     let parsed = parsed_module(db, file.python_file(db)).load(db);
-    let value = definition.kind(db).value(&parsed)?;
+    let Some(value) = definition.kind(db).value(&parsed) else {
+        return GenericContext::None;
+    };
     let mut collector = ImplicitAliasLegacyTypeVarCollector {
         db,
         alias_definition: definition,
@@ -45,13 +47,11 @@ pub(in crate::types) fn implicit_alias_parameters<'db>(
         variables: FxOrderSet::default(),
     };
     collector.visit_expr(value);
-    (!collector.variables.is_empty()).then(|| {
-        GenericContext::from_typevar_instances(
-            db,
-            &ProgramEnvironment::from_file(file),
-            collector.variables,
-        )
-    })
+    GenericContext::from_typevar_instances(
+        db,
+        &ProgramEnvironment::from_file(file),
+        collector.variables,
+    )
 }
 
 struct ImplicitAliasLegacyTypeVarCollector<'a, 'db> {

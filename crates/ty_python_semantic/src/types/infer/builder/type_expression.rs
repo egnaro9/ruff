@@ -48,7 +48,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         &mut self,
         value_ty: Type<'db>,
         definition: Option<Definition<'db>>,
-    ) -> Option<(Type<'db>, Option<GenericContext<'db>>)> {
+    ) -> Option<(Type<'db>, GenericContext<'db>)> {
         let db = self.db();
         let mut definition = definition?;
         // A resolved non-recursive value already describes the alias. Gradual types, unions,
@@ -263,10 +263,10 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         let env = self.program_environment();
         if let Some((alias, parameters)) = self.recursive_implicit_alias_reference(ty, definition) {
             return match parameters {
-                Some(parameters) => {
+                parameters @ GenericContext::Some(_) => {
                     alias.apply_specialization(db, parameters.default_specialization(db, None))
                 }
-                None => alias,
+                GenericContext::None => alias,
             };
         }
         if annotation.is_attribute_expr()
@@ -1309,7 +1309,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         value_ty: Type<'db>,
         definition: Option<Definition<'db>>,
     ) -> Type<'db> {
-        if let Some((alias, Some(parameters))) =
+        if let Some((alias, parameters @ GenericContext::Some(_))) =
             self.recursive_implicit_alias_reference(value_ty, definition)
         {
             let db = self.db();
@@ -1668,7 +1668,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                             SubclassOfType::from(db, env, class_type)
                         } else {
                             match class_literal.generic_context(db) {
-                                Some(generic_context) => {
+                                generic_context @ GenericContext::Some(_) => {
                                     let specialize = &|types: &[Option<Type<'db>>]| {
                                         let class = class_literal.apply_specialization(db, |_| {
                                             generic_context
@@ -1692,7 +1692,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                                         specialize,
                                     )
                                 }
-                                None => {
+                                GenericContext::None => {
                                     if !self.in_string_annotation() {
                                         self.infer_expression(parameters, TypeContext::default());
                                     }
@@ -1931,7 +1931,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 }
                 KnownInstanceType::TypeAliasType(type_alias) => {
                     match type_alias.generic_context(self.db()) {
-                        Some(generic_context) => {
+                        generic_context @ GenericContext::Some(_) => {
                             let specialized_type_alias = self
                                 .infer_explicit_type_alias_type_specialization(
                                     subscript,
@@ -1949,7 +1949,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                                 )
                                 .unwrap_or(Type::unknown())
                         }
-                        None => {
+                        GenericContext::None => {
                             if !self.in_string_annotation() {
                                 self.infer_expression(slice, TypeContext::default());
                             }
@@ -2105,7 +2105,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             }
             Type::ClassLiteral(class) => {
                 match (class.generic_context(self.db()), class.as_static()) {
-                    (Some(generic_context), Some(static_class)) => {
+                    (generic_context @ GenericContext::Some(_), Some(static_class)) => {
                         let specialized_class = self.infer_explicit_class_specialization(
                             subscript,
                             value_ty,

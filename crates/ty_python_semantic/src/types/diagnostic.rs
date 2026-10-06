@@ -35,9 +35,9 @@ use crate::types::typed_dict::TypedDictSchema;
 use crate::types::typevar::TypeVarInstance;
 use crate::types::unpacker::{starred_assignment_values, unpacked_assignment_value};
 use crate::types::{
-    BoundTypeVarInstance, ClassType, DynamicType, ErrorContextTree, LintDiagnosticGuard,
-    SpecialFormType, SubclassOfInner, Type, TypeContext, TypeVarVariance, binding_type,
-    protocol_class::ProtocolClass,
+    BoundTypeVarInstance, ClassType, DynamicType, ErrorContextTree, GenericContext,
+    LintDiagnosticGuard, SpecialFormType, SubclassOfInner, Type, TypeContext, TypeVarVariance,
+    binding_type, protocol_class::ProtocolClass,
 };
 use crate::types::{KnownInstanceType, MemberLookupPolicy, TypeVarKind, TypedDictType, UnionType};
 use crate::{Db, DisplaySettings, FxIndexMap, ProgramEnvironment, SemanticModel, declare_lint};
@@ -841,7 +841,7 @@ pub(super) fn report_missing_type_arguments<'db>(
         Type::ClassLiteral(class) => {
             let db = context.db();
 
-            let Some(generic_context) = class.generic_context(db) else {
+            let generic_context @ GenericContext::Some(_) = class.generic_context(db) else {
                 return;
             };
 

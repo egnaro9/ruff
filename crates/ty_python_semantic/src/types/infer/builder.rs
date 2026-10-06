@@ -5842,11 +5842,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         let mut try_narrow = |narrowed_ty: Type<'db>| {
             // Short-circuit if there is no overload with a matching return type.
             if !bindings.satisfies(|overload| {
-                let inferable = overload
-                    .signature
-                    .generic_context
-                    .map(|generic_context| generic_context.inferable_typevars(db))
-                    .unwrap_or(TypeVarSet::None);
+                let inferable = overload.signature.generic_context.inferable_typevars(db);
 
                 !overload
                     .return_ty
@@ -6849,7 +6845,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         }) {
             return ty;
         }
-        let Some(class_generic_context) = class.generic_context(db) else {
+        let class_generic_context @ GenericContext::Some(_) = class.generic_context(db) else {
             return ty;
         };
         let Some(source_callable) = ty.try_upcast_to_callable(db, env) else {
@@ -6861,18 +6857,13 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         let source_callable = source_callable.map(|callable| {
             let signatures = CallableSignature::from_overloads(
                 callable.signatures(db).overloads.iter().map(|signature| {
-                    let signature_generic_context = signature.generic_context.and_then(|context| {
-                        let mut variables = context
-                            .variables(db)
-                            .filter(|typevar| {
-                                !class_generic_context.contains(db, typevar.identity(db))
-                            })
-                            .peekable();
-                        variables
-                            .peek()
-                            .is_some()
-                            .then(|| GenericContext::from_typevar_instances(db, env, variables))
-                    });
+                    let signature_generic_context = GenericContext::from_typevar_instances(
+                        db,
+                        env,
+                        signature.generic_context.variables(db).filter(|typevar| {
+                            !class_generic_context.contains(db, typevar.identity(db))
+                        }),
+                    );
                     Signature::new_generic(
                         signature_generic_context,
                         signature.parameters().clone(),
@@ -7234,9 +7225,9 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         let tcx = tcx.map(|annotation| {
             let inferable = KnownClass::Tuple
                 .try_to_class_literal(db, env)
-                .and_then(|class| class.generic_context(db))
-                .map(|generic_context| generic_context.inferable_typevars(db))
-                .unwrap_or(TypeVarSet::None);
+                .map_or(TypeVarSet::None, |class| {
+                    class.generic_context(db).inferable_typevars(db)
+                });
             annotation
                 .discard_disjoint_union_elements(
                     db,
@@ -9040,13 +9031,13 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
     fn collection_use_constraint_from_specialization(
         &self,
         identity_instance: Type<'db>,
-        receiver_generic_context: Option<GenericContext<'db>>,
+        receiver_generic_context: GenericContext<'db>,
         call_specialization: Specialization<'db>,
     ) -> Option<Type<'db>> {
         let db = self.db();
         let env = self.program_environment();
         let constraint = identity_instance.apply_specialization(db, call_specialization);
-        let Some(receiver_generic_context) = receiver_generic_context else {
+        let receiver_generic_context @ GenericContext::Some(_) = receiver_generic_context else {
             return Some(constraint);
         };
 

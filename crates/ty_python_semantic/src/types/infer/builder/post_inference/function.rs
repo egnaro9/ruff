@@ -73,7 +73,7 @@ pub(super) fn check_class_method_typevar_variance<'db>(
     // variance inference, but only nominal classes currently skip overloads and independently
     // generic methods to avoid false positives.
     // TODO: Handle these cases in shared variance inference so both checks can account for them.
-    let Some(generic_context) = class.generic_context(db) else {
+    let generic_context @ GenericContext::Some(_) = class.generic_context(db) else {
         return;
     };
     if !generic_context.variables(db).any(|typevar| {
@@ -152,11 +152,10 @@ fn exclude_from_variance<'db>(db: &'db dyn Db, function: FunctionType<'db>) -> b
     // TODO: Account for those relationships instead of just composing each occurrence's variance.
     // Use the lexical context so that type parameters moved into a returned callable also count.
     let lexical_signature = last_definition.raw_signature(db, ReturnCallableTypeVarScope::Lexical);
-    lexical_signature.generic_context.is_some_and(|context| {
-        context
-            .variables(db)
-            .any(|typevar| !typevar.typevar(db).is_self(db))
-    })
+    lexical_signature
+        .generic_context
+        .variables(db)
+        .any(|typevar| !typevar.typevar(db).is_self(db))
 }
 
 fn check_method_typevar_variance<'db>(
@@ -294,7 +293,7 @@ fn check_pep695_function_legacy_typevars<'db>(
     let Some(definition) = signature.definition() else {
         return;
     };
-    let Some(legacy_context) = GenericContext::from_function_params(
+    let legacy_context @ GenericContext::Some(_) = GenericContext::from_function_params(
         db,
         definition,
         signature.parameters(),
@@ -399,7 +398,7 @@ fn check_legacy_typevar_defaults<'db>(
 ) {
     let db = context.db();
 
-    let Some(generic_context) = signature.generic_context else {
+    let generic_context @ GenericContext::Some(_) = signature.generic_context else {
         return;
     };
 
@@ -531,7 +530,7 @@ fn check_legacy_typevar_ordering<'db>(
 
     let db = context.db();
 
-    let Some(generic_context) = signature.generic_context else {
+    let generic_context @ GenericContext::Some(_) = signature.generic_context else {
         return;
     };
 

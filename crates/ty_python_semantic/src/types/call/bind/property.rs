@@ -2,8 +2,8 @@ use super::{Bindings, ConstructorCallableKind};
 use crate::db::Db;
 use crate::types::call::CallArguments;
 use crate::types::{
-    ClassBase, KnownClass, MemberLookupPolicy, ProgramEnvironment, PropertyInstanceType, Type,
-    is_property_method,
+    ClassBase, GenericContext, KnownClass, MemberLookupPolicy, ProgramEnvironment,
+    PropertyInstanceType, Type, is_property_method,
 };
 use itertools::Itertools;
 
@@ -44,10 +44,11 @@ impl<'db> Bindings<'db> {
                         Some(KnownClass::Property | KnownClass::EnumProperty)
                     ) {
                         Some(true)
-                    } else if ["fget", "fset", "fdel"]
-                        .into_iter()
-                        .any(|name| !base.own_class_member(db, env, None, name).is_undefined())
-                    {
+                    } else if ["fget", "fset", "fdel"].into_iter().any(|name| {
+                        !base
+                            .own_class_member(db, env, GenericContext::None, name)
+                            .is_undefined()
+                    }) {
                         Some(false)
                     } else {
                         None

@@ -272,11 +272,11 @@ impl<'db> RecursiveDefinition<'db> {
         };
 
         let specialization = match target.generic_context(db) {
-            Some(generic_context) => Some(
+            generic_context @ GenericContext::Some(_) => Some(
                 specialization
                     .unwrap_or_else(|| target.default_specialization(db, generic_context)),
             ),
-            None => specialization,
+            GenericContext::None => specialization,
         };
         Some(DefinitionUse {
             target,
@@ -292,7 +292,7 @@ impl<'db> RecursiveDefinition<'db> {
         }
     }
 
-    fn generic_context(self, db: &'db dyn Db) -> Option<GenericContext<'db>> {
+    fn generic_context(self, db: &'db dyn Db) -> GenericContext<'db> {
         match self {
             Self::TypeAlias(alias) => alias.generic_context(db),
             Self::Structural(recursive) => recursive.parameters(db),
@@ -327,8 +327,7 @@ impl<'db> RecursiveDefinition<'db> {
     /// The identities of this definition's formal parameters, in declaration order.
     fn parameters(self, db: &'db dyn Db) -> impl Iterator<Item = BoundTypeVarIdentity<'db>> {
         self.generic_context(db)
-            .into_iter()
-            .flat_map(|context| context.variables(db))
+            .variables(db)
             .map(move |parameter| Self::parameter_identity(db, parameter))
     }
 
@@ -616,7 +615,7 @@ impl<'db> SpecializationFlowVisitor<'db> {
             .borrow_mut()
             .push(reference.target);
 
-        let Some(target_context) = reference.target.generic_context(db) else {
+        let target_context @ GenericContext::Some(_) = reference.target.generic_context(db) else {
             if reference.specialization.is_some() {
                 self.inconclusive.set(true);
             }

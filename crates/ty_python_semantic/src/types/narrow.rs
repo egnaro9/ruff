@@ -18,13 +18,13 @@ use crate::types::typed_dict::{TypedDictFieldBuilder, TypedDictSchema, TypedDict
 use crate::types::unpacker::collected_list_type;
 use crate::types::{
     CallableType, ClassBase, ClassLiteral, ClassPatternPositionalSource, ClassType, CycleDetector,
-    IntersectionBuilder, IntersectionType, KnownClass, KnownInstanceType, LiteralValueTypeKind,
-    Parameter, Parameters, Signature, SpecialFormType, SubclassOfInner, SubclassOfType, Truthiness,
-    Type, TypeContext, TypeVarBoundOrConstraints, UnfoldResult, UnionBuilder, binding_type,
-    class_pattern_positional_sources, definite_match_pattern_type_for_subject,
-    exact_sequence_pattern_type, infer_expression_types, mapping_pattern_type,
-    pattern_binding_fallthrough_type, sequence_pattern_type_builder, singleton_pattern_type,
-    starred_sequence_pattern_type, typed_dict_matches_class_pattern,
+    GenericContext, IntersectionBuilder, IntersectionType, KnownClass, KnownInstanceType,
+    LiteralValueTypeKind, Parameter, Parameters, Signature, SpecialFormType, SubclassOfInner,
+    SubclassOfType, Truthiness, Type, TypeContext, TypeVarBoundOrConstraints, UnfoldResult,
+    UnionBuilder, binding_type, class_pattern_positional_sources,
+    definite_match_pattern_type_for_subject, exact_sequence_pattern_type, infer_expression_types,
+    mapping_pattern_type, pattern_binding_fallthrough_type, sequence_pattern_type_builder,
+    singleton_pattern_type, starred_sequence_pattern_type, typed_dict_matches_class_pattern,
 };
 use crate::{Db, ProgramEnvironment};
 use ty_python_core::ast_ids::HasScopedUseId;
@@ -909,7 +909,9 @@ fn specialize_narrowing_target_from_intersection<'db>(
     target: Type<'db>,
 ) -> Option<Type<'db>> {
     let target_class = target.nominal_class(db, env)?.class_literal(db);
-    let generic_context = target_class.generic_context(db)?;
+    let generic_context @ GenericContext::Some(_) = target_class.generic_context(db) else {
+        return None;
+    };
     let target_identity = target_class.identity_specialization(db);
 
     let compatible_bases: SmallVec<[(ClassType<'db>, ClassType<'db>); 2]> = intersection
@@ -1039,7 +1041,9 @@ fn specialize_generic_class_for_subject<'db>(
     target_class: ClassLiteral<'db>,
     subject_class: ClassType<'db>,
 ) -> Option<ClassType<'db>> {
-    let generic_context = target_class.generic_context(db)?;
+    let generic_context @ GenericContext::Some(_) = target_class.generic_context(db) else {
+        return None;
+    };
     let target_identity = target_class.identity_specialization(db);
     let target_base = target_identity
         .iter_mro(db)
@@ -1071,7 +1075,9 @@ fn specialize_generic_class_from_solutions<'db>(
     target_class: ClassLiteral<'db>,
     solutions: Solutions<'db>,
 ) -> Option<ClassType<'db>> {
-    let generic_context = target_class.generic_context(db)?;
+    let generic_context @ GenericContext::Some(_) = target_class.generic_context(db) else {
+        return None;
+    };
     let Solutions::Constrained(solutions) = solutions else {
         return None;
     };
@@ -2593,19 +2599,16 @@ impl<'db, 'pattern> PatternSuccessAnalyzer<'db, 'pattern> {
                 member_ty = Some(specialized_member_ty);
             } else if use_generic_filtering
                 && let Some(pattern_class) = context.class
+                && let generic_context @ GenericContext::Some(_) = pattern_class.generic_context(db)
                 && pattern_class
-                    .generic_context(db)
-                    .and_then(|generic_context| {
-                        pattern_class
-                            .instance_member(
-                                db,
-                                &self.env,
-                                Some(generic_context.identity_specialization(db)),
-                                name.as_str(),
-                            )
-                            .place
-                            .ignore_possibly_undefined()
-                    })
+                    .instance_member(
+                        db,
+                        &self.env,
+                        Some(generic_context.identity_specialization(db)),
+                        name.as_str(),
+                    )
+                    .place
+                    .ignore_possibly_undefined()
                     .is_some_and(|ty| ty.has_typevar(db, &self.env))
             {
                 let unknown_pattern_class = pattern_class.unknown_specialization(db);
@@ -2931,7 +2934,7 @@ impl<'db, 'pattern> PatternSuccessAnalyzer<'db, 'pattern> {
                 return false;
             }
             if class
-                .own_class_member(db, &self.env, None, "get")
+                .own_class_member(db, &self.env, GenericContext::None, "get")
                 .is_undefined()
             {
                 continue;

@@ -345,9 +345,11 @@ impl<'db> CallableSignature<'db> {
 
                     let env = visitor.env;
                     Some(CallableSignature::single(Signature {
-                        generic_context: self_signature.generic_context.map(|context| {
-                            type_mapping.update_signature_generic_context(db, env, context)
-                        }),
+                        generic_context: type_mapping.update_signature_generic_context(
+                            db,
+                            env,
+                            self_signature.generic_context,
+                        ),
                         definition: self_signature.definition,
                         extras: SignatureExtras::new(
                             self_signature.source_overload_index_raw(),
@@ -373,12 +375,13 @@ impl<'db> CallableSignature<'db> {
                     let env = visitor.env;
                     Some(CallableSignature::from_overloads(
                         callable.signatures(db).iter().map(|signature| Signature {
-                            generic_context: GenericContext::merge_optional(
+                            generic_context: signature.generic_context.merge(
                                 db,
-                                signature.generic_context,
-                                self_signature.generic_context.map(|context| {
-                                    type_mapping.update_signature_generic_context(db, env, context)
-                                }),
+                                type_mapping.update_signature_generic_context(
+                                    db,
+                                    env,
+                                    self_signature.generic_context,
+                                ),
                             ),
                             // Keep the enclosing method's definition for binding `Self` and
                             // other receiver type variables after specializing its parameters.
@@ -650,7 +653,7 @@ impl<'db> VarianceInferable<'db> for &CallableSignature<'db> {
 #[derive(Clone, Debug, get_size2::GetSize, PartialEq, Eq, Hash, salsa::SalsaValue)]
 pub struct Signature<'db> {
     /// The generic context for this overload, if it is generic.
-    pub(crate) generic_context: Option<GenericContext<'db>>,
+    pub(crate) generic_context: GenericContext<'db>,
 
     /// The original definition associated with this function, if available.
     /// This is useful for locating and extracting docstring information for the signature.
@@ -763,7 +766,7 @@ pub(super) fn walk_signature<'db, V: super::visitor::TypeVisitor<'db> + ?Sized>(
     signature: &Signature<'db>,
     visitor: &V,
 ) {
-    if let Some(generic_context) = &signature.generic_context {
+    if let generic_context @ GenericContext::Some(_) = &signature.generic_context {
         walk_generic_context(db, *generic_context, visitor);
     }
     for ty in signature.receiver_constraint_types() {
@@ -835,7 +838,7 @@ impl<'db> PartialApplication<'db> {
 impl<'db> Signature<'db> {
     pub(crate) fn new(parameters: Parameters<'db>, return_ty: Type<'db>) -> Self {
         Self {
-            generic_context: None,
+            generic_context: GenericContext::None,
             definition: None,
             extras: None,
             parameters,
@@ -844,7 +847,7 @@ impl<'db> Signature<'db> {
     }
 
     pub(crate) fn new_generic(
-        generic_context: Option<GenericContext<'db>>,
+        generic_context: GenericContext<'db>,
         parameters: Parameters<'db>,
         return_ty: Type<'db>,
     ) -> Self {
@@ -876,7 +879,7 @@ impl<'db> Signature<'db> {
     /// Return a signature for a dynamic callable
     pub(crate) fn dynamic(signature_type: Type<'db>) -> Self {
         Signature {
-            generic_context: None,
+            generic_context: GenericContext::None,
             definition: None,
             extras: None,
             parameters: Parameters::gradual_form(),
@@ -887,7 +890,7 @@ impl<'db> Signature<'db> {
     /// Return a typed signature from a function definition.
     pub(super) fn from_function(
         db: &'db dyn Db,
-        pep695_generic_context: Option<GenericContext<'db>>,
+        pep695_generic_context: GenericContext<'db>,
         definition: Definition<'db>,
         function_node: &ast::StmtFunctionDef,
         has_implicitly_positional_first_parameter: bool,
@@ -985,14 +988,7 @@ impl<'db> Signature<'db> {
         db: &'db dyn Db,
         inherited_generic_context: GenericContext<'db>,
     ) -> Self {
-        match self.generic_context.as_mut() {
-            Some(generic_context) => {
-                *generic_context = generic_context.merge(db, inherited_generic_context);
-            }
-            None => {
-                self.generic_context = Some(inherited_generic_context);
-            }
-        }
+        self.generic_context = self.generic_context.merge(db, inherited_generic_context);
         self
     }
 
@@ -1070,9 +1066,11 @@ impl<'db> Signature<'db> {
     ) -> Self {
         let env = visitor.env;
         Self {
-            generic_context: self
-                .generic_context
-                .map(|context| type_mapping.update_signature_generic_context(db, env, context)),
+            generic_context: type_mapping.update_signature_generic_context(
+                db,
+                env,
+                self.generic_context,
+            ),
             definition: self.definition,
             extras: SignatureExtras::new(
                 self.source_overload_index_raw(),
@@ -1097,7 +1095,7 @@ impl<'db> Signature<'db> {
         env: &ProgramEnvironment<'db>,
         delta: u32,
     ) -> Self {
-        let Some(generic_context) = self.generic_context else {
+        let generic_context @ GenericContext::Some(_) = self.generic_context else {
             return self.clone();
         };
 
@@ -1117,11 +1115,7 @@ impl<'db> Signature<'db> {
         db: &'db dyn Db,
         generic_context: GenericContext<'db>,
     ) -> Option<TypeVarNonce> {
-        let typevars = self
-            .generic_context
-            .into_iter()
-            .flat_map(|context| context.variables(db))
-            .map(Type::TypeVar);
+        let typevars = self.generic_context.variables(db).map(Type::TypeVar);
         let parameters = self.parameters.iter().flat_map(|parameter| {
             std::iter::once(parameter.annotated_type()).chain(parameter.eager_default_type())
         });
@@ -1196,27 +1190,17 @@ impl<'db> Signature<'db> {
                 _ => None,
             };
 
-            if let Some(self_typevar) = self_typevar {
-                match self.generic_context.as_mut() {
-                    Some(generic_context)
-                        if generic_context
-                            .binds_typevar(db, self_typevar.typevar(db))
-                            .is_some() => {}
-                    Some(generic_context) => {
-                        *generic_context = GenericContext::from_typevar_instances(
-                            db,
-                            env,
-                            std::iter::once(self_typevar).chain(generic_context.variables(db)),
-                        );
-                    }
-                    None => {
-                        self.generic_context = Some(GenericContext::from_typevar_instances(
-                            db,
-                            env,
-                            std::iter::once(self_typevar),
-                        ));
-                    }
-                }
+            if let Some(self_typevar) = self_typevar
+                && self
+                    .generic_context
+                    .binds_typevar(db, self_typevar.typevar(db))
+                    .is_none()
+            {
+                self.generic_context = GenericContext::from_typevar_instances(
+                    db,
+                    env,
+                    std::iter::once(self_typevar).chain(self.generic_context.variables(db)),
+                );
             }
         }
     }
@@ -1348,9 +1332,7 @@ impl<'db> Signature<'db> {
                 return_ty.apply_type_mapping(db, env, &self_mapping, TypeContext::default());
         }
         Self {
-            generic_context: self
-                .generic_context
-                .map(|generic_context| generic_context.remove_self(db, binding_context)),
+            generic_context: self.generic_context.remove_self(db, binding_context),
             definition: self.definition,
             extras: SignatureExtras::new(
                 self.source_overload_index_raw(),
@@ -1434,7 +1416,7 @@ impl<'db> Signature<'db> {
             Ok(Solutions::Constrained(_)) => {}
         }
 
-        let Some(generic_context) = self.generic_context else {
+        let generic_context @ GenericContext::Some(_) = self.generic_context else {
             return Some(CallableSignature::single(self.clone()));
         };
 
@@ -1580,7 +1562,7 @@ impl<'db> Signature<'db> {
         else {
             return false;
         };
-        let Some(generic_context) = self.generic_context else {
+        let generic_context @ GenericContext::Some(_) = self.generic_context else {
             return false;
         };
         let Some(definition) = self.definition else {
@@ -1630,7 +1612,9 @@ impl<'db> Signature<'db> {
         env: &ProgramEnvironment<'db>,
         self_type: Type<'db>,
     ) -> Option<Self> {
-        let context = self.generic_context?;
+        let context @ GenericContext::Some(_) = self.generic_context else {
+            return None;
+        };
         let (receiver, parameters) = self.parameters.as_slice().split_first()?;
 
         // Ensure `Self` is not used elsewhere in the signature, in which case eagerly binding it
@@ -1821,7 +1805,10 @@ impl<'db> Signature<'db> {
 
     /// Returns this signature with the given specialization applied to parameters and return type.
     fn apply_specialization(&self, db: &'db dyn Db, specialization: Specialization<'db>) -> Self {
-        let env = &ProgramEnvironment::from_program(specialization.generic_context(db).program(db));
+        let Some(program) = specialization.generic_context(db).program(db) else {
+            return self.clone();
+        };
+        let env = &ProgramEnvironment::from_program(program);
         let type_mapping =
             TypeMapping::ApplySpecialization(ApplySpecialization::specialization(specialization));
         self.apply_type_mapping_impl(
@@ -1936,7 +1923,7 @@ impl<'db> Signature<'db> {
         let inference = inference?;
         let generic_context = self
             .generic_context
-            .unwrap_or_else(|| inference.generic_context(db));
+            .or_else(|| inference.generic_context(db));
 
         let promoted_typevars: FxHashSet<BoundTypeVarIdentity<'db>> = generic_context
             .variables(db)
@@ -1982,10 +1969,7 @@ impl<'db> Signature<'db> {
     }
 
     fn inferable_typevars(&self, db: &'db dyn Db) -> TypeVarSet<'db> {
-        match self.generic_context {
-            Some(generic_context) => generic_context.inferable_typevars(db),
-            None => TypeVarSet::None,
-        }
+        self.generic_context.inferable_typevars(db)
     }
 
     pub(crate) fn is_non_generic(&self) -> bool {
@@ -2575,10 +2559,12 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         // freshening and quantifying them as callable-local variables. Eager comparisons still
         // use the stored generic context to simplify bounds for compatibility inference.
         let signature_context = |signature: &Signature<'db>| {
-            signature.generic_context.filter(|_| {
-                !signature.is_paramspec_value()
-                    || self.typevar_evaluation != TypeVarEvaluation::Lazy
-            })
+            if !signature.is_paramspec_value() || self.typevar_evaluation != TypeVarEvaluation::Lazy
+            {
+                signature.generic_context
+            } else {
+                GenericContext::None
+            }
         };
         // If either signature is generic, freshen that signature's typevars before considering
         // them inferable for this relation. The relation only needs to find one specialization of
@@ -2586,7 +2572,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         // specializations must not collide with any same-source typevars in the other signature.
         let freshened_source;
         let source = if signature_context(source) != signature_context(target)
-            && let Some(generic_context) = signature_context(source)
+            && let generic_context @ GenericContext::Some(_) = signature_context(source)
             && let Some(delta) = target
                 .max_typevar_freshness_matching_generic_context(db, generic_context)
                 .map(|freshness| freshness.increment().value())
@@ -2598,7 +2584,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         };
 
         let freshened_target;
-        let target = if let Some(generic_context) = signature_context(target)
+        let target = if let generic_context @ GenericContext::Some(_) = signature_context(target)
             && let Some(delta) = source
                 .max_typevar_freshness_matching_generic_context(db, generic_context)
                 .map(|freshness| freshness.increment().value())
@@ -2609,10 +2595,8 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
             target
         };
 
-        let signature_typevars = |signature: &Signature<'db>| {
-            signature_context(signature)
-                .map_or(TypeVarSet::None, |context| context.inferable_typevars(db))
-        };
+        let signature_typevars =
+            |signature: &Signature<'db>| signature_context(signature).inferable_typevars(db);
         let source_inferable = signature_typevars(source);
         let target_inferable = signature_typevars(target);
         let signature_inferable = source_inferable.merge(db, target_inferable);
@@ -6380,7 +6364,7 @@ mod tests {
                 .literal(&db)
                 .last_definition
                 .signature(&db);
-            let generic_context = signature.generic_context.expect("f has a ParamSpec");
+            let generic_context = signature.generic_context;
             let expected_positions = (0..signature.parameters.len())
                 .map(Some)
                 .collect::<Vec<_>>();

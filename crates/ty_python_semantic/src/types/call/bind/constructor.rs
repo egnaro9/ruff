@@ -109,10 +109,8 @@ impl<'db> ConstructorBinding<'db> {
         // without owning that class's type variables. Only a context inherited by the constructor
         // signature is eligible for freshening.
         let owns_generic_context = self.entry.overloads.iter().any(|overload| {
-            overload
-                .signature
-                .generic_context
-                .is_some_and(|owned| generic_context.is_subset_of(db, owned))
+            overload.signature.generic_context.is_some()
+                && generic_context.is_subset_of(db, overload.signature.generic_context)
         });
         if !owns_generic_context
             || generic_context_has_paramspec(db, generic_context)
@@ -166,8 +164,7 @@ impl<'db> ConstructorBinding<'db> {
                     overload
                         .signature
                         .generic_context
-                        .into_iter()
-                        .flat_map(|context| context.variables(db))
+                        .variables(db)
                         .filter(|typevar| typevar.typevar(db).is_self(db)),
                 ),
             );

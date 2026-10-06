@@ -4472,8 +4472,11 @@ impl<'db> Type<'db> {
             },
             _ => self.to_class_type(db),
         };
-        let own_class_attr =
-            own_class.map(|class| class.own_class_member(db, env, None, name).inner);
+        let own_class_attr = own_class.map(|class| {
+            class
+                .own_class_member(db, env, GenericContext::None, name)
+                .inner
+        });
 
         // A definitely-declared attribute in this class's own namespace is the contract for
         // values populated by metaclass initialization, analogous to a declared instance
@@ -5683,9 +5686,9 @@ impl<'db> Type<'db> {
             Type::GenericAlias(alias) => alias.origin(db).into(),
             _ => return false,
         };
-        let Some(generic_context) = class
+        let generic_context @ GenericContext::Some(_) = class
             .as_static()
-            .and_then(|class| class.generic_context(db))
+            .map_or(GenericContext::None, |class| class.generic_context(db))
         else {
             return false;
         };
@@ -6946,7 +6949,7 @@ impl<'db> Type<'db> {
                     Binding::single(
                         self,
                         Signature::new_generic(
-                            Some(GenericContext::from_typevar_instances(db, env, [val_ty])),
+                            GenericContext::from_typevar_instances(db, env, [val_ty]),
                             Parameters::standard([
                                 Parameter::positional_only(Some(Name::new_static("value")))
                                     .with_annotated_type(Type::TypeVar(val_ty)),
@@ -7270,11 +7273,8 @@ impl<'db> Type<'db> {
                 // decorator adds methods to the class
                 let returns =
                     IntersectionType::from_two_elements(db, env, typevar_meta, Type::any());
-                let signature = Signature::new_generic(
-                    Some(context),
-                    Parameters::standard(parameters),
-                    returns,
-                );
+                let signature =
+                    Signature::new_generic(context, Parameters::standard(parameters), returns);
                 Binding::single(self, signature).into()
             }
 
@@ -7602,7 +7602,7 @@ impl<'db> Type<'db> {
                     Binding::single(
                         self,
                         Signature::new_generic(
-                            Some(GenericContext::from_typevar_instances(db, env, [return_ty])),
+                            GenericContext::from_typevar_instances(db, env, [return_ty]),
                             Parameters::concatenate(
                                 db,
                                 vec![
@@ -7649,11 +7649,7 @@ impl<'db> Type<'db> {
                         [
                             Signature::new(Parameters::empty(), Type::empty_tuple(db, env)),
                             Signature::new_generic(
-                                Some(GenericContext::from_typevar_instances(
-                                    db,
-                                    env,
-                                    [element_ty],
-                                )),
+                                GenericContext::from_typevar_instances(db, env, [element_ty]),
                                 Parameters::standard([Parameter::positional_only(Some(
                                     Name::new_static("iterable"),
                                 ))
@@ -7734,7 +7730,7 @@ impl<'db> Type<'db> {
             if matches!(self, Type::ClassLiteral(_) | Type::GenericAlias(_)) {
                 class_generic_context
             } else {
-                None
+                GenericContext::None
             };
         let constructor_member_policy =
             if class_generic_context.is_some() && inferable_class_context.is_none() {
@@ -9386,9 +9382,10 @@ impl<'db> Type<'db> {
         returns(copy),
         cycle_initial=|_, id, _, _, _| Type::divergent(id),
         cycle_fn=|db, cycle, previous: &Type<'db>, value: Type<'db>, _, specialization: Specialization<'db>, _| {
-            let env = ProgramEnvironment::from_program(
-                specialization.generic_context(db).program(db),
-            );
+            let Some(program) = specialization.generic_context(db).program(db) else {
+                return value;
+            };
+            let env = ProgramEnvironment::from_program(program);
             value.cycle_normalized_impl(db, &env, *previous, cycle)
         },
         heap_size=ruff_memory_usage::heap_size
@@ -9399,7 +9396,10 @@ impl<'db> Type<'db> {
         specialization: Specialization<'db>,
         specialize_self_domain: bool,
     ) -> Type<'db> {
-        let env = &ProgramEnvironment::from_program(specialization.generic_context(db).program(db));
+        let Some(program) = specialization.generic_context(db).program(db) else {
+            return self;
+        };
+        let env = &ProgramEnvironment::from_program(program);
         let apply_specialization = ApplySpecialization::Specialization {
             specialization,
             specialize_self_domain,

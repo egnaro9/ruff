@@ -149,12 +149,16 @@ fn synthesize_typed_dict_init<'db>(
     let instance_ty = Type::TypedDict(typed_dict);
     // Only a bare generic class exposes a generic method. Explicit aliases already substitute
     // their arguments into both the receiver and the fields.
-    let generic_context = typed_dict.defining_class().and_then(|class| {
-        let alias = class.into_generic_alias()?;
-        let specialization = alias.specialization(db);
-        let generic_context = specialization.generic_context(db);
-        (specialization == generic_context.identity_specialization(db)).then_some(generic_context)
-    });
+    let generic_context = typed_dict
+        .defining_class()
+        .and_then(|class| {
+            let alias = class.into_generic_alias()?;
+            let specialization = alias.specialization(db);
+            let generic_context = specialization.generic_context(db);
+            (specialization == generic_context.identity_specialization(db))
+                .then_some(generic_context)
+        })
+        .unwrap_or_default();
     let keyword_fields: Vec<_> = fields
         .iter()
         .filter(|(name, _)| is_identifier(name))
@@ -425,7 +429,7 @@ fn synthesize_typed_dict_get<'db>(
                     .with_annotated_type(Type::TypeVar(t_default)),
             ];
             let get_with_default_sig = Signature::new_generic(
-                Some(GenericContext::from_typevar_instances(db, env, [t_default])),
+                GenericContext::from_typevar_instances(db, env, [t_default]),
                 Parameters::standard(get_with_default_sig_params),
                 if field.is_required() {
                     field.declared_ty
@@ -490,7 +494,7 @@ fn synthesize_typed_dict_get<'db>(
             ];
 
             Signature::new_generic(
-                Some(GenericContext::from_typevar_instances(db, env, [t_default])),
+                GenericContext::from_typevar_instances(db, env, [t_default]),
                 Parameters::standard(parameters),
                 UnionType::from_two_elements(db, env, fallback_value_ty, Type::TypeVar(t_default)),
             )
@@ -618,7 +622,7 @@ fn synthesize_typed_dict_pop<'db>(
                 .with_annotated_type(Type::TypeVar(t_default)),
         ];
         let pop_with_default_sig = Signature::new_generic(
-            Some(GenericContext::from_typevar_instances(db, env, [t_default])),
+            GenericContext::from_typevar_instances(db, env, [t_default]),
             Parameters::standard(pop_with_default_parameters),
             UnionType::from_two_elements(db, env, value_ty, Type::TypeVar(t_default)),
         );

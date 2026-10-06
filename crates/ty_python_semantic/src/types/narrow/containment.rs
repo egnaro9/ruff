@@ -1,6 +1,8 @@
 use crate::Db;
 use crate::ProgramEnvironment;
-use crate::types::{ClassBase, IntersectionBuilder, KnownClass, Type, UnionBuilder};
+use crate::types::{
+    ClassBase, GenericContext, IntersectionBuilder, KnownClass, Type, UnionBuilder,
+};
 
 enum ContainmentBehavior<'db> {
     /// Membership compares against the elements yielded by the wrapped type. Callers use
@@ -122,7 +124,7 @@ fn containment_behavior<'db>(
                     return ContainmentBehavior::ElementsOf(Type::instance(db, env, class));
                 }
                 if !class
-                    .own_class_member(db, env, None, "__contains__")
+                    .own_class_member(db, env, GenericContext::None, "__contains__")
                     .is_undefined()
                 {
                     return ContainmentBehavior::Custom;

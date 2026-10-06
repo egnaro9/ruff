@@ -18,9 +18,9 @@ use super::constraints::{ConstraintSet, IteratorConstraintsExtension, OptionCons
 use super::dedicated::pydantic;
 use super::relation::TypeRelationChecker;
 use super::{
-    BindingContext, IntersectionType, KnownClass, KnownInstanceType, MemberLookupPolicy, Parameter,
-    PropertyInstanceType, SelfBinding, Signature, Type, TypeContext, TypeMapping, TypeQualifiers,
-    TypeVarBoundOrConstraints, UnionType, UpcastPolicy,
+    BindingContext, GenericContext, IntersectionType, KnownClass, KnownInstanceType,
+    MemberLookupPolicy, Parameter, PropertyInstanceType, SelfBinding, Signature, Type, TypeContext,
+    TypeMapping, TypeQualifiers, TypeVarBoundOrConstraints, UnionType, UpcastPolicy,
 };
 use crate::ProgramEnvironment;
 use crate::place::{
@@ -1133,7 +1133,7 @@ fn descriptor_setter_signature_domain<'db>(
     let Type::TypeVar(typevar) = write_ty else {
         return DescriptorSetterSignatureDomain::Deferred;
     };
-    let Some(generic_context) = signature.generic_context else {
+    let generic_context @ GenericContext::Some(_) = signature.generic_context else {
         return DescriptorSetterSignatureDomain::Deferred;
     };
     if !generic_context.contains(db, typevar.identity(db))
@@ -1159,11 +1159,14 @@ fn contains_signature_typevar<'db>(
     signature: &Signature<'db>,
     ty: Type<'db>,
 ) -> bool {
-    signature.generic_context.is_some_and(|generic_context| {
-        super::visitor::any_over_type(db, env, ty, true, |ty| {
-            matches!(ty, Type::TypeVar(typevar) if generic_context.contains(db, typevar.identity(db)))
-        })
-    })
+    signature.generic_context.is_some()
+        && super::visitor::any_over_type(
+            db,
+            env,
+            ty,
+            true,
+            |ty| matches!(ty, Type::TypeVar(typevar) if signature.generic_context.contains(db, typevar.identity(db))),
+        )
 }
 
 /// Union the value parameter types accepted by a property's setter overloads.

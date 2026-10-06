@@ -715,12 +715,10 @@ pub(super) fn contains_growing_type<'db>(
                 Type::Recursive(recursive) => recursive.parameters(db).is_some(),
                 Type::ProtocolInstance(protocol) => protocol
                     .class_origin(db)
-                    .and_then(|class| class.class_literal(db).generic_context(db))
-                    .is_some(),
+                    .is_some_and(|class| class.class_literal(db).generic_context(db).is_some()),
                 Type::TypedDict(typed_dict) => typed_dict
                     .defining_class()
-                    .and_then(|class| class.class_literal(db).generic_context(db))
-                    .is_some(),
+                    .is_some_and(|class| class.class_literal(db).generic_context(db).is_some()),
                 _ => false,
             };
             if is_generic
