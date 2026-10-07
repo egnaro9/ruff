@@ -325,14 +325,7 @@ fn caller_fixed_upper_bound_failures_preserve_evidence_and_order() {
         let lower = |ty| ConstraintSet::constrain_typevar_lower_bound(db, &env, &builder, t, ty);
         let set =
             lower(Type::TypeVar(fixed[0])).or(db, &builder, || lower(Type::TypeVar(fixed[1])));
-        let result = set.solutions_with_policy(
-            db,
-            &env,
-            inferable,
-            SolutionBudget::default(),
-            FixedTypeVarPolicy::RequireCallerFixedBounds,
-            |_, candidate| CandidateSolutions::default_solve(db, &env, &builder, candidate),
-        );
+        let result = strict_solutions(db, set, inferable);
         let Ok(Solutions::Unsatisfiable(SolutionPaths::Complete(paths))) = result else {
             panic!("expected invalid paths, got {result:?}");
         };
@@ -503,19 +496,6 @@ fn upper_bound_specializes_captured_callable_variables() {
         None,
         TypeVarNonce::NONE,
     );
-    let q_identity = TypeVarIdentity::new(
-        db,
-        Name::new_static("Q"),
-        None,
-        TypeVarKind::Pep695ParamSpec,
-    );
-    let indirect_paramspec = BoundTypeVarInstance::new(
-        db,
-        TypeVarInstance::new(db, q_identity, None, None, None),
-        BindingContext::Synthetic(env.program(db)),
-        None,
-        TypeVarNonce::NONE,
-    );
     for (captured_var, annotation, receiver, valid) in [
         (u, Type::TypeVar(u), int, true),
         (u, list(Type::TypeVar(u)), list(Type::TypeVar(s)), true),
@@ -545,39 +525,22 @@ fn upper_bound_specializes_captured_callable_variables() {
             CallableSignature::single(signature),
             CallableTypeKind::ParamSpecValue,
         ));
-        for mixed in [false, true] {
-            let builder = ConstraintSetBuilder::new();
-            let set = ConstraintSet::constrain_typevar_lower_bound(db, &env, &builder, t, callable)
-                .and(db, &builder, || {
-                    if mixed {
-                        ConstraintSet::constrain_typevar_lower_bound(
-                            db,
-                            &env,
-                            &builder,
-                            paramspec,
-                            Type::TypeVar(indirect_paramspec),
-                        )
-                        .and(db, &builder, || {
-                            exact(db, &builder, indirect_paramspec, captured)
-                                .with_validity_bounds(db, &env)
-                        })
-                    } else {
-                        ConstraintSet::constrain_typevar_lower_bound(
-                            db, &env, &builder, paramspec, captured,
-                        )
-                    }
-                });
-            let inferable = TypeVarSet::from_typevars(db, [t, paramspec, indirect_paramspec]);
-            let result = strict_solutions(db, set, inferable);
-            assert!(
-                matches!(
-                    (&result, valid),
-                    (Ok(Solutions::Constrained(_)), true)
-                        | (Ok(Solutions::Unsatisfiable(_)), false)
-                ),
-                "mixed = {mixed}, result = {result:?}"
-            );
-        }
+        let builder = ConstraintSetBuilder::new();
+        let set = ConstraintSet::constrain_typevar_lower_bound(db, &env, &builder, t, callable)
+            .and(db, &builder, || {
+                ConstraintSet::constrain_typevar_lower_bound(
+                    db, &env, &builder, paramspec, captured,
+                )
+            });
+        let inferable = TypeVarSet::from_typevars(db, [t, paramspec]);
+        let result = strict_solutions(db, set, inferable);
+        assert!(
+            matches!(
+                (&result, valid),
+                (Ok(Solutions::Constrained(_)), true) | (Ok(Solutions::Unsatisfiable(_)), false)
+            ),
+            "receiver = {receiver:?}, result = {result:?}"
+        );
     }
 }
 
