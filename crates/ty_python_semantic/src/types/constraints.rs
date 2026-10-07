@@ -3423,6 +3423,15 @@ fn is_possibly_constraint_set_assignable<'db>(db: &'db dyn Db, types: TypePair<'
         .query(|_storage, when| !when.is_never_satisfied(db, env, TypeVarSet::None))
 }
 
+/// Whether solving a path may assume conditions on variables that it cannot infer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FixedTypeVarPolicy {
+    /// Each solution is conditional on the constraints of its path.
+    Conditional,
+    /// Inferred bounds must hold for every specialization fixed by the caller.
+    RequireCallerFixedBounds,
+}
+
 /// Candidate solutions for a constraint set
 #[derive(Clone, Debug, Eq, Hash, PartialEq, get_size2::GetSize, salsa::SalsaValue)]
 pub(crate) enum CandidateSolutions<'db> {
@@ -3506,6 +3515,7 @@ impl<'db> CandidateSolutions<'db> {
             node,
             inferable,
             source_order,
+            FixedTypeVarPolicy::Conditional,
             &mut UnboundedSolutionLimits,
         );
         result
@@ -3516,6 +3526,7 @@ impl<'db> CandidateSolutions<'db> {
     /// Visits include the concrete-conjunction fast path and both BDD walks. The path limit
     /// counts materialized constrained paths; an unconstrained or unsatisfiable result needs no
     /// path allowance. No partially collected family is returned when either limit is exhausted.
+    #[expect(clippy::too_many_arguments)]
     fn compute_bounded(
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
@@ -3524,6 +3535,7 @@ impl<'db> CandidateSolutions<'db> {
         inferable: TypeVarSet<'db>,
         source_order: Option<SourceOrderId>,
         budget: SolutionBudget,
+        fixed_typevar_policy: FixedTypeVarPolicy,
     ) -> Result<Self, ProjectionError> {
         let mut limits = BoundedSolutionLimits {
             remaining_paths: budget.paths,
@@ -3536,6 +3548,7 @@ impl<'db> CandidateSolutions<'db> {
             node,
             inferable,
             source_order,
+            fixed_typevar_policy,
             &mut limits,
         ) {
             ControlFlow::Continue(result) => Ok(result),
@@ -3543,6 +3556,7 @@ impl<'db> CandidateSolutions<'db> {
         }
     }
 
+    #[expect(clippy::too_many_arguments)]
     fn compute_with_limits<L: SolutionLimits>(
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
@@ -3550,6 +3564,7 @@ impl<'db> CandidateSolutions<'db> {
         node: NodeId,
         inferable: TypeVarSet<'db>,
         source_order: Option<SourceOrderId>,
+        fixed_typevar_policy: FixedTypeVarPolicy,
         limits: &mut L,
     ) -> ControlFlow<L::Break, Self> {
         let source_orders = storage.calculate_source_orders(source_order);
@@ -3566,6 +3581,7 @@ impl<'db> CandidateSolutions<'db> {
         }
 
         let mut walker = SolutionWalker::new(db, storage, source_orders, inferable, node);
+        walker.fixed_typevar_policy = fixed_typevar_policy;
         // Sequent discovery must also happen in source order. Sorting the collected paths is
         // too late: sequent pairs are not commutative, and TDD traversal order can otherwise
         // discard gradual evidence before solution extraction.
@@ -4853,6 +4869,7 @@ mod tests {
                 visits: max_visits,
                 ..SolutionBudget::default()
             },
+            FixedTypeVarPolicy::Conditional,
         )
     }
 
