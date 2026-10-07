@@ -15,8 +15,8 @@ use crate::types::constraints::projection::{ProjectionError, SolutionBudget, Sol
 use crate::types::constraints::resolution::{SolutionType, resolve_solution};
 use crate::types::constraints::{
     CandidateSolutions, CandidateTypeVarSolution, ConstraintFailureEvidence, ConstraintSet,
-    ConstraintSetBuilder, FixedTypeVarPolicy, IteratorConstraintsExtension, PathBoundSolution,
-    Solution, SolutionPaths, SolutionViolation, SolutionViolationKind, Solutions, TypeVarSolution,
+    ConstraintSetBuilder, IteratorConstraintsExtension, PathBoundSolution, Solution, SolutionPaths,
+    SolutionViolation, SolutionViolationKind, Solutions, TypeVarSolution,
 };
 use crate::types::cyclic::{ActiveRecursionDetector, CycleDetector, HasIdentity, TypeIdentity};
 use crate::types::infer::original_class_type;
@@ -2509,7 +2509,6 @@ pub(crate) struct SpecializationBuilder<'db, 'c> {
     constraints: &'c ConstraintSetBuilder<'db>,
     generic_context: GenericContext<'db>,
     inferable: TypeVarSet<'db>,
-    fixed_typevar_policy: FixedTypeVarPolicy,
     pending: ConstraintSet<'db, 'c>,
     types: LegacyTypeMappings<'db>,
     paramspec_seen: FxHashSet<BoundTypeVarIdentity<'db>>,
@@ -2748,22 +2747,10 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
             constraints,
             generic_context,
             inferable: generic_context.inferable_typevars(db),
-            fixed_typevar_policy: FixedTypeVarPolicy::Conditional,
             pending: ConstraintSet::from_bool(constraints, true),
             types: LegacyTypeMappings::Available(FxHashMap::default()),
             paramspec_seen: FxHashSet::default(),
         }
-    }
-
-    pub(crate) fn new_for_call(
-        db: &'db dyn Db,
-        env: &'c ProgramEnvironment<'db>,
-        constraints: &'c ConstraintSetBuilder<'db>,
-        generic_context: GenericContext<'db>,
-    ) -> Self {
-        let mut builder = Self::new(db, env, constraints, generic_context);
-        builder.fixed_typevar_policy = FixedTypeVarPolicy::RequireCallerFixedBounds;
-        builder
     }
 
     /// Adds a constraint set to the pending specialization and projects its valid solutions into
@@ -2809,7 +2796,6 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
                     builder.env,
                     builder.inferable,
                     SolutionBudget::default(),
-                    builder.fixed_typevar_policy,
                     |_variance, path_bound| {
                         let outcome = choose(path_bound.bound_typevar, Some(path_bound))
                             .unwrap_or_else(|| {
@@ -2959,12 +2945,11 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
         let db = self.db;
         let mut specialization_errors = Vec::new();
         let inference = self.solve_pending_projection(choose, |builder, choose| {
-            let solutions = builder.pending.solutions_with_policy(
+            let solutions = builder.pending.solutions_with(
                 db,
                 builder.env,
                 builder.inferable,
                 budget,
-                builder.fixed_typevar_policy,
                 |_variance, path_bound| {
                     choose(path_bound.bound_typevar, Some(path_bound)).unwrap_or_else(|| {
                         CandidateSolutions::default_solve(
@@ -3542,12 +3527,11 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
     /// Solves one relation without recording it or changing the legacy type mappings.
     fn analyze_constraint_set(&self, set: ConstraintSet<'db, 'c>) -> ConstraintSetAnalysis<'db> {
         let db = self.db;
-        let solutions = set.solutions_with_policy(
+        let solutions = set.solutions_with(
             db,
             self.env,
             self.inferable,
             SolutionBudget::default(),
-            self.fixed_typevar_policy,
             |_variance, path_bound| {
                 CandidateSolutions::preliminary_solve(db, self.env, self.constraints, path_bound)
             },
